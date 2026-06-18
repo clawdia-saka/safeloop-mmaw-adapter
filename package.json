@@ -11,6 +11,16 @@
     "README.md",
     "docs"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./metamask": {
+      "types": "./dist/metamask.d.ts",
+      "default": "./dist/metamask.js"
+    }
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json"
@@ -20,4 +30,3 @@
     "typescript": "^5.8.0"
   }
 }
-

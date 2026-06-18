@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export * from "./metamask.js";
+
 export type ActionType =
   | "swap"
   | "transfer"

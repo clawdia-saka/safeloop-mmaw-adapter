@@ -1,6 +1,12 @@
-# Safeloop MMAW Adapter
+# Safeloop MetaMask Agent Wallet Adapter
 
 Pre-sign safety layer for MetaMask Agent Wallet.
+
+This repo now includes explicit MetaMask connection points:
+
+- `src/metamask.ts` wraps a MetaMask Agentic SDK-style client.
+- `src/metamask.ts` includes an `mm` CLI adapter for MetaMask Agentic CLI.
+- The MetaMask integration guide shows how those adapters plug into Safeloop.
 
 This project adds a runtime gate before an autonomous agent can sign a wallet action. It is designed to stop mistakes that normal wallet permissions do not catch, such as an agent repeatedly swapping `ETH -> USDC -> ETH` until the wallet loses funds to gas, slippage, or bad retries.
 
@@ -106,11 +112,12 @@ If ledger, simulation, or invariant checks are unknown or failed, the function t
 
 ```ts
 import { failClosedSign } from "@safeloop/mmaw-adapter";
+import { createMetaMaskAgenticSdkSigner } from "@safeloop/mmaw-adapter/metamask";
 
 const signedOperation = await failClosedSign({
   intent,
   ledger,
-  mmaw,
+  mmaw: createMetaMaskAgenticSdkSigner(agenticSdk),
   simulator,
   policy,
 });
@@ -130,20 +137,24 @@ Included:
 - simulator interface
 - fail-closed signing gateway
 - default trajectory invariant checks
+- MetaMask Agentic SDK-style signer adapter
+- MetaMask Agentic CLI `mm` adapter for transfers and swaps
 
 Not included yet:
 
 - production ledger adapter
 - Anvil or Tenderly simulator adapter
-- direct `@metamask/agentic-sdk` wrapper
-- CLI wrapper for `mm`
+- full concrete `@metamask/agentic-sdk` API binding
+- full `mm` command coverage
 - notification adapter
 
 ## Repository Layout
 
 ```text
 src/index.ts              Core adapter types and fail-closed signing flow
+src/metamask.ts           MetaMask Agentic SDK and mm CLI adapters
 docs/architecture.md      Detailed architecture and policy model
+docs/metamask.md             MetaMask integration guide
 ```
 
 ## Safety Model
@@ -161,7 +172,7 @@ That means:
 
 1. Add Supabase Action Ledger adapter.
 2. Add Anvil dry-run simulator adapter.
-3. Add MetaMask Agentic SDK wrapper.
-4. Add `mm` CLI wrapper.
+3. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.
+4. Expand `mm` CLI wrapper beyond transfer and swap.
 5. Add Slack and Notion notification hooks.
 6. Add policy file support with YAML.
