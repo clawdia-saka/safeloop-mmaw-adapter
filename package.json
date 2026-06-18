@@ -1,0 +1,23 @@
+{
+  "name": "@safeloop/mmaw-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pre-sign runtime safety layer for MetaMask Agent Wallet.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}
+

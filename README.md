@@ -1,0 +1,167 @@
+# Safeloop MMAW Adapter
+
+Pre-sign safety layer for MetaMask Agent Wallet.
+
+This project adds a runtime gate before an autonomous agent can sign a wallet action. It is designed to stop mistakes that normal wallet permissions do not catch, such as an agent repeatedly swapping `ETH -> USDC -> ETH` until the wallet loses funds to gas, slippage, or bad retries.
+
+## The Problem
+
+Wallet policies can answer questions like:
+
+- Is this agent allowed to swap?
+- Is this amount under the daily limit?
+- Is this contract blocked?
+
+Those checks are useful, but they do not answer:
+
+- Is the agent repeating the same action?
+- Is the agent reversing its previous action for no useful reason?
+- Is the agent losing money through a loop?
+- Did the agent think a failed transaction succeeded?
+
+Safeloop handles that missing layer.
+
+## What It Does
+
+Safeloop sits between the agent and MetaMask Agent Wallet.
+
+```text
+Agent intent
+  -> Safeloop safety checks
+  -> MetaMask Agent Wallet signing
+  -> Transaction submission
+  -> Safeloop reconciliation
+```
+
+It signs only when all checks pass:
+
+1. The action is written to an Action Ledger.
+2. A deterministic idempotency key is created.
+3. A dry-run simulation passes.
+4. Recent wallet activity does not violate trajectory rules.
+5. The ledger state is consistent.
+
+If any check fails, Safeloop aborts before signing.
+
+## Plain-English Example
+
+Without Safeloop:
+
+```text
+Agent swaps ETH to USDC.
+Agent panics.
+Agent swaps USDC back to ETH.
+Agent repeats.
+Wallet slowly drains from gas and slippage.
+```
+
+With Safeloop:
+
+```text
+Agent requests ETH -> USDC.
+Safeloop records it.
+Agent requests USDC -> ETH shortly after.
+Safeloop detects a reverse route loop.
+Safeloop refuses to sign.
+```
+
+## Architecture
+
+### Phase 1: Intent Ledger + Pre-Sign Gate
+
+Every proposed action is converted into a canonical intent and locked in a ledger before signing.
+
+This prevents:
+
+- duplicated actions
+- double execution
+- unsafe retries
+- agent memory drifting away from transaction state
+
+### Phase 2: Trajectory Invariant Engine
+
+Safeloop checks the recent action history, not just the current transaction.
+
+It can reject:
+
+- reverse swap loops
+- repeated failed retries
+- cumulative gas loss
+- net asset value loss beyond policy
+- unbounded approvals without a matching downstream action
+
+### Phase 3: Fail-Closed Signing Gateway
+
+Agents do not call MetaMask signing directly.
+
+They call:
+
+```ts
+failClosedSign(...)
+```
+
+If ledger, simulation, or invariant checks are unknown or failed, the function throws before signing.
+
+## Core API
+
+```ts
+import { failClosedSign } from "@safeloop/mmaw-adapter";
+
+const signedOperation = await failClosedSign({
+  intent,
+  ledger,
+  mmaw,
+  simulator,
+  policy,
+});
+```
+
+The adapter is intentionally dependency-light. Storage, simulation, and MetaMask integration are injected as interfaces so teams can connect their own Notion, Supabase, Anvil, Tenderly, or MMAW setup.
+
+## Current Status
+
+Prototype.
+
+Included:
+
+- canonical intent generation
+- idempotency key generation
+- ledger interface
+- simulator interface
+- fail-closed signing gateway
+- default trajectory invariant checks
+
+Not included yet:
+
+- production ledger adapter
+- Anvil or Tenderly simulator adapter
+- direct `@metamask/agentic-sdk` wrapper
+- CLI wrapper for `mm`
+- notification adapter
+
+## Repository Layout
+
+```text
+src/index.ts              Core adapter types and fail-closed signing flow
+docs/architecture.md      Detailed architecture and policy model
+```
+
+## Safety Model
+
+Safeloop defaults to fail-closed.
+
+That means:
+
+- failed check: do not sign
+- unknown check: do not sign
+- unavailable simulation: do not sign
+- ledger conflict: do not sign
+
+## Roadmap
+
+1. Add Supabase Action Ledger adapter.
+2. Add Anvil dry-run simulator adapter.
+3. Add MetaMask Agentic SDK wrapper.
+4. Add `mm` CLI wrapper.
+5. Add Slack and Notion notification hooks.
+6. Add policy file support with YAML.
