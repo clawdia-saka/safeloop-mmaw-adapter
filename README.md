@@ -2,7 +2,20 @@
 
 Pre-sign safety layer for MetaMask Agent Wallet.
 
-This repo now includes explicit MetaMask connection points:
+Safeloop is a guardrail for autonomous wallet agents. It sits before signing and
+asks: "Is this action still safe given what the agent just did, what is still
+pending, and what could still land later?"
+
+It is aimed at failures that normal wallet permission rules do not catch:
+
+- an agent repeating the same trade until gas and slippage drain the wallet
+- an agent reversing its own swap in a loop
+- a retry creating the same position twice
+- a partial fill being treated as success
+- a signed or broadcasting transaction being forgotten after a crash
+- an emergency close being blocked by stale locks, RPC lag, or gas depletion
+
+This repo includes explicit MetaMask connection points:
 
 - `src/metamask.ts` wraps a MetaMask Agentic SDK-style client.
 - `src/metamask.ts` includes an `mm` CLI adapter for MetaMask Agentic CLI.
@@ -10,7 +23,17 @@ This repo now includes explicit MetaMask connection points:
 - `docs/hip3.md` covers the current Hyperliquid HIP-3 perps workflow.
 - `docs/death-metrics.md` covers red-team failure scenarios and required guards.
 
-This project adds a runtime gate before an autonomous agent can sign a wallet action. It is designed to stop mistakes that normal wallet permissions do not catch, such as an agent repeatedly swapping `ETH -> USDC -> ETH` until the wallet loses funds to gas, slippage, or bad retries.
+## Quick Start
+
+```bash
+npm install
+npm run typecheck
+npm test
+```
+
+The package is currently a prototype. Storage, simulation, and signing are
+interfaces, so production users must connect their own durable ledger,
+simulation backend, and MetaMask Agent Wallet integration.
 
 ## The Problem
 
@@ -29,6 +52,25 @@ Those checks are useful, but they do not answer:
 - Is a submitted wallet request still waiting for MFA, stuck broadcasting, or never reconciled with the venue?
 
 Safeloop handles that missing layer.
+
+## Key Guarantees
+
+Safeloop is designed around four simple guarantees:
+
+1. Do not sign the same intent twice.
+2. Do not sign when the recent action path is unsafe.
+3. Do not treat pending, partial, reverted, or unknown state as success.
+4. Do not let emergency exits depend on a single stale worker, lock, RPC, or gas
+   assumption.
+
+For cancellation and preemption, Safeloop is intentionally strict:
+
+- mempool or multi-RPC broadcast quorum is telemetry, not proof
+- cancellation must be ordered or confirmed by default
+- same-nonce cancellation evidence must be bound to the transaction it replaces
+- RPC quorum partition does not unlock new risk
+- only reduce-only or close-all emergency closes can use the narrow partition
+  escape path
 
 ## What It Does
 
@@ -172,9 +214,22 @@ const signedOperation = await failClosedSign({
 
 The adapter is intentionally dependency-light. Storage, simulation, and MetaMask integration are injected as interfaces so teams can connect their own Notion, Supabase, Anvil, Tenderly, or MMAW setup.
 
+## Minimal Integration Shape
+
+Production integrations provide three pieces:
+
+- `Ledger`: durable action log, idempotency keys, locks, and reconciliation state
+- `Simulator`: dry-run or venue-aware risk model for the unsigned operation
+- `MmawSigner`: MetaMask Agent Wallet wrapper that builds and signs operations
+
+Safeloop calls them in order. If any result is failed or unknown, signing stops.
+
 ## Current Status
 
 Prototype.
+
+This repository is public, but it is not a hosted service. It does not contain a
+shared Supabase instance, wallet keys, API keys, RPC keys, or operator logs.
 
 Included:
 
