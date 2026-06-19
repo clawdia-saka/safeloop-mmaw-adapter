@@ -50,6 +50,10 @@ Supported commands in the current prototype:
 
 - `mm transfer`
 - `mm swap execute`
+- `mm perps open`
+- `mm perps close`
+- `mm perps modify`
+- `mm perps cancel`
 
 The CLI adapter builds the `mm` command after intent canonicalization, but execution still passes through `failClosedSign`.
 
@@ -58,7 +62,10 @@ Current mapping:
 ```text
 transfer -> mm transfer --token <assetOut> --amount <amountIn> --to <targetContract> --chain-id <chainId> --json
 swap     -> mm swap execute --from-token <assetIn> --to-token <assetOut> --amount <amountIn> --from-chain <chainId> --json
+perps    -> mm perps <open|close|modify|cancel> ... --dry-run --json
 ```
+
+For Hyperliquid HIP-3 builder DEX markets, see `docs/hip3.md`.
 
 ## Why This Matters
 
@@ -67,4 +74,3 @@ MetaMask wallet policy can limit what an agent is allowed to do.
 Safeloop decides whether the next action still makes sense based on recent wallet history and dry-run results.
 
 That difference is the point of the integration.
-

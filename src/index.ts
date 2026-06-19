@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
+import { canonicalizePerpsFields } from "./hip3.js";
+
 export * from "./metamask.js";
+export * from "./hip3.js";
 
 export type ActionType =
   | "swap"
@@ -8,7 +11,13 @@ export type ActionType =
   | "approve"
   | "lend"
   | "borrow"
-  | "bridge";
+  | "bridge"
+  | "perps_open"
+  | "perps_close"
+  | "perps_modify"
+  | "perps_cancel"
+  | "perps_deposit"
+  | "perps_withdraw";
 
 export type LedgerStatus =
   | "PLANNED"
@@ -49,6 +58,20 @@ export type AgentIntent = {
   calldata?: `0x${string}`;
   route?: string[];
   expectedUtility?: string;
+  venue?: "hyperliquid";
+  network?: "mainnet" | "testnet";
+  dex?: string;
+  symbol?: string;
+  side?: "long" | "short";
+  size?: string;
+  leverage?: string;
+  orderType?: "market" | "limit";
+  limitPx?: string;
+  takeProfitPx?: string;
+  stopLossPx?: string;
+  maxSlippageBps?: string;
+  orderId?: string;
+  closeAll?: boolean;
 };
 
 export type CanonicalIntent = Omit<AgentIntent, "calldata" | "route"> & {
@@ -168,7 +191,8 @@ export function canonicalizeIntent(
       ? sha256(JSON.stringify(intent.route.map((entry) => entry.toLowerCase())))
       : undefined,
     expectedUtility: intent.expectedUtility,
-    roundedAmountBucket: roundAmountBucket(intent.amountIn),
+    ...canonicalizePerpsFields(intent),
+    roundedAmountBucket: roundAmountBucket(intent.amountIn ?? intent.size),
     timeBucket,
   };
 }
@@ -183,6 +207,19 @@ export function makeIdempotencyKey(intent: CanonicalIntent): string {
       calldataHash: intent.calldataHash,
       chainId: intent.chainId,
       routeHash: intent.routeHash,
+      dex: intent.dex,
+      network: intent.network,
+      orderId: intent.orderId,
+      orderType: intent.orderType,
+      closeAll: intent.closeAll,
+      leverage: intent.leverage,
+      limitPx: intent.limitPx,
+      maxSlippageBps: intent.maxSlippageBps,
+      side: intent.side,
+      size: intent.size,
+      symbol: intent.symbol,
+      takeProfitPx: intent.takeProfitPx,
+      stopLossPx: intent.stopLossPx,
       targetContract: intent.targetContract,
       timeBucket: intent.timeBucket,
       userGoalId: intent.userGoalId,

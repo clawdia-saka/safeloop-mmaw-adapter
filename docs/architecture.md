@@ -24,6 +24,7 @@ Safeloop owns:
 - dry-run simulation gating
 - fail-closed signing decisions
 - reconciliation between chain state and agent memory
+- HIP-3 market identity tracking for perps flows
 
 ## Runtime Flow
 
@@ -103,6 +104,10 @@ USDC -> ETH
 
 Reject if the same user goal has already failed too many times in a short window.
 
+### HIP-3 Market Mismatch
+
+Reject or require review when a perps action references an unqualified builder DEX market. For example, an agent should not confuse `spcx` on the main market with `xyz:spcx` on a HIP-3 builder DEX.
+
 ### NAV Guard
 
 Reject if simulated net asset value loss exceeds the configured basis-point limit.
@@ -138,4 +143,3 @@ Required integrations:
 - `MmawSigner`: build unsigned operations and sign approved operations.
 
 This keeps the core adapter portable across Notion, Supabase, local SQLite, Anvil, Tenderly, and different MetaMask Agent Wallet wiring.
-

@@ -19,6 +19,10 @@
     "./metamask": {
       "types": "./dist/metamask.d.ts",
       "default": "./dist/metamask.js"
+    },
+    "./hip3": {
+      "types": "./dist/hip3.d.ts",
+      "default": "./dist/hip3.js"
     }
   },
   "scripts": {

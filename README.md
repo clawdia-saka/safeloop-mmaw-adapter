@@ -7,6 +7,7 @@ This repo now includes explicit MetaMask connection points:
 - `src/metamask.ts` wraps a MetaMask Agentic SDK-style client.
 - `src/metamask.ts` includes an `mm` CLI adapter for MetaMask Agentic CLI.
 - The MetaMask integration guide shows how those adapters plug into Safeloop.
+- `docs/hip3.md` covers the current Hyperliquid HIP-3 perps workflow.
 
 This project adds a runtime gate before an autonomous agent can sign a wallet action. It is designed to stop mistakes that normal wallet permissions do not catch, such as an agent repeatedly swapping `ETH -> USDC -> ETH` until the wallet loses funds to gas, slippage, or bad retries.
 
@@ -95,6 +96,7 @@ It can reject:
 - cumulative gas loss
 - net asset value loss beyond policy
 - unbounded approvals without a matching downstream action
+- HIP-3 perps mistakes, such as opening on the wrong builder DEX market or retrying close/cancel loops
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -139,13 +141,14 @@ Included:
 - default trajectory invariant checks
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
+- MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
 
 Not included yet:
 
 - production ledger adapter
 - Anvil or Tenderly simulator adapter
 - full concrete `@metamask/agentic-sdk` API binding
-- full `mm` command coverage
+- full `mm` command coverage beyond transfer, swap, and perps prototype commands
 - notification adapter
 
 ## Repository Layout
@@ -155,6 +158,7 @@ src/index.ts              Core adapter types and fail-closed signing flow
 src/metamask.ts           MetaMask Agentic SDK and mm CLI adapters
 docs/architecture.md      Detailed architecture and policy model
 docs/metamask.md             MetaMask integration guide
+docs/hip3.md                 Hyperliquid HIP-3 perps use case
 ```
 
 ## Safety Model
@@ -173,6 +177,6 @@ That means:
 1. Add Supabase Action Ledger adapter.
 2. Add Anvil dry-run simulator adapter.
 3. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.
-4. Expand `mm` CLI wrapper beyond transfer and swap.
+4. Expand `mm` CLI wrapper beyond transfer, swap, and perps prototype commands.
 5. Add Slack and Notion notification hooks.
 6. Add policy file support with YAML.

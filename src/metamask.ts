@@ -49,6 +49,14 @@ export function buildMmArgs(intent: CanonicalIntent): string[] {
       return buildTransferArgs(intent);
     case "swap":
       return buildSwapArgs(intent);
+    case "perps_open":
+      return buildPerpsOpenArgs(intent);
+    case "perps_close":
+      return buildPerpsCloseArgs(intent);
+    case "perps_modify":
+      return buildPerpsModifyArgs(intent);
+    case "perps_cancel":
+      return buildPerpsCancelArgs(intent);
     default:
       throw new Error(`UNSUPPORTED_MM_CLI_ACTION:${intent.actionType}`);
   }
@@ -89,6 +97,109 @@ function buildSwapArgs(intent: CanonicalIntent): string[] {
   ];
 }
 
+function buildPerpsOpenArgs(intent: CanonicalIntent): string[] {
+  requireFields(intent, ["symbol", "side", "size", "leverage"]);
+
+  const args = [
+    "perps",
+    "open",
+    "--venue",
+    intent.venue ?? "hyperliquid",
+    "--symbol",
+    intent.symbol,
+    "--side",
+    intent.side,
+    "--size",
+    intent.size,
+    "--leverage",
+    intent.leverage,
+    "--type",
+    intent.orderType ?? "market",
+    "--network",
+    intent.network ?? "mainnet",
+    "--dry-run",
+    "--json",
+  ];
+
+  appendOptional(args, "--limit-px", intent.limitPx);
+  appendOptional(args, "--max-slippage-bps", intent.maxSlippageBps);
+
+  return args;
+}
+
+function buildPerpsCloseArgs(intent: CanonicalIntent): string[] {
+  const args = [
+    "perps",
+    "close",
+    "--venue",
+    intent.venue ?? "hyperliquid",
+    "--network",
+    intent.network ?? "mainnet",
+    "--dry-run",
+    "--json",
+  ];
+
+  if (intent.closeAll) {
+    args.push("--all");
+  } else {
+    requireFields(intent, ["symbol"]);
+    args.push("--symbol", intent.symbol);
+    appendOptional(args, "--size", intent.size);
+  }
+
+  appendOptional(args, "--max-slippage-bps", intent.maxSlippageBps);
+
+  return args;
+}
+
+function buildPerpsModifyArgs(intent: CanonicalIntent): string[] {
+  requireFields(intent, ["symbol"]);
+
+  if (!intent.leverage && !intent.takeProfitPx && !intent.stopLossPx) {
+    throw new Error("MISSING_PERPS_MODIFY_FIELD");
+  }
+
+  const args = [
+    "perps",
+    "modify",
+    "--venue",
+    intent.venue ?? "hyperliquid",
+    "--symbol",
+    intent.symbol,
+    "--network",
+    intent.network ?? "mainnet",
+    "--dry-run",
+    "--json",
+  ];
+
+  appendOptional(args, "--leverage", intent.leverage);
+  appendOptional(args, "--tp", intent.takeProfitPx);
+  appendOptional(args, "--sl", intent.stopLossPx);
+
+  return args;
+}
+
+function buildPerpsCancelArgs(intent: CanonicalIntent): string[] {
+  requireFields(intent, ["orderId"]);
+
+  const args = [
+    "perps",
+    "cancel",
+    "--venue",
+    intent.venue ?? "hyperliquid",
+    "--order-id",
+    intent.orderId,
+    "--network",
+    intent.network ?? "mainnet",
+    "--dry-run",
+    "--json",
+  ];
+
+  appendOptional(args, "--symbol", intent.symbol);
+
+  return args;
+}
+
 function requireFields<T extends keyof CanonicalIntent>(
   intent: CanonicalIntent,
   fields: T[],
@@ -97,6 +208,10 @@ function requireFields<T extends keyof CanonicalIntent>(
   if (missing.length > 0) {
     throw new Error(`MISSING_MM_CLI_FIELDS:${missing.join(",")}`);
   }
+}
+
+function appendOptional(args: string[], flag: string, value?: string): void {
+  if (value) args.push(flag, value);
 }
 
 function runMmCli(operation: MmCliOperation): Promise<{
