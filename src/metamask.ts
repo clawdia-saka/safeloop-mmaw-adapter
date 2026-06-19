@@ -1,5 +1,52 @@
 import { spawn } from "node:child_process";
-import type { AgentIntent, CanonicalIntent, MmawSigner } from "./index.js";
+import type { CanonicalIntent, MmawSigner, AbortReason } from "./index.js";
+
+export type EvidencePacket = {
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  invariantViolations: string[];
+  timestamp: string;
+  requestId: string;
+};
+
+export class IntentGuardError extends Error {
+  constructor(
+    public readonly code: AbortReason,
+    public readonly reason: string,
+    public readonly evidence?: EvidencePacket,
+  ) {
+    super(reason);
+    this.name = "IntentGuardError";
+  }
+}
+
+/**
+ * DM-F1: Pre-Sign Intent Invariant Gate
+ * Blocking interceptor to verify intent trajectory before signing.
+ */
+export function verifyIntentTrajectory(intent: CanonicalIntent): void {
+  const violations: string[] = [];
+
+  // Check for wash trade conditions (same token in/out)
+  if (intent.assetIn && intent.assetIn === intent.assetOut) {
+    violations.push("WASH_TRADE_DETECTED: Same token in/out");
+  }
+
+  // Check Loss Budget (Example threshold of 50k USD per instruction)
+  const tradeValue = Number(intent.estimatedTradeValueUsd ?? "0");
+  if (tradeValue > 50000) {
+    violations.push("LOSS_BUDGET_EXCEEDED: Intent exceeds trade value threshold");
+  }
+
+  if (violations.length > 0) {
+    throw new IntentGuardError(
+      violations[0].includes("LOSS") ? "CUMULATIVE_LOSS_LIMIT" : "REVERSE_SWAP_LOOP",
+      violations.join("; ")
+    );
+  }
+}
 
 export type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
@@ -14,7 +61,35 @@ export function createMetaMaskAgenticSdkSigner<
 ): MmawSigner<TUnsignedOperation, TSignedOperation> {
   return {
     buildUnsignedOperation: (intent) => sdk.buildUnsignedOperation(intent),
-    sign: (operation) => sdk.sign(operation),
+    sign: async (operation: TUnsignedOperation) => {
+      // DM-F1: Interceptor for SDK
+      const intent = (operation as any).intent;
+      if (intent) {
+        verifyIntentTrajectory(intent);
+      }
+
+      try {
+        return await sdk.sign(operation);
+      } catch (error: any) {
+        // DM-F3: Structured Failure Evidence Packet
+        const packet: EvidencePacket = {
+          command: "sdk.sign",
+          exitCode: null,
+          stdout: "",
+          stderr: error.message || String(error),
+          invariantViolations: [],
+          timestamp: new Date().toISOString(),
+          requestId: intent?.userGoalId || "unknown",
+        };
+        
+        // Fire-and-forget audit log (simulated)
+        console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
+
+        const wrapped = new Error(`SDK_SIGN_FAILED: ${error.message}`);
+        (wrapped as any).evidence = packet;
+        throw wrapped;
+      }
+    },
   };
 }
 
@@ -39,7 +114,11 @@ export function createMmCliSigner(
         intent,
       };
     },
-    sign: runner,
+    sign: async (operation) => {
+      // DM-F1: Interceptor for CLI
+      verifyIntentTrajectory(operation.intent);
+      return await runner(operation);
+    },
   };
 }
 
@@ -74,8 +153,8 @@ export function buildWalletRequestsWatchArgs(pollingId: string): string[] {
 }
 
 export function buildTxHistoryArgs(params: {
-  addresses?: `0x${string}`[];
-  chains?: Array<number | `eip155:${number}`>;
+  addresses?: `0x\${string}`[];
+  chains?: Array<number | `eip155:\${number}`>;
   type?: "in" | "out" | "self" | string;
   limit?: number;
 } = {}): string[] {
@@ -245,7 +324,7 @@ function requireFields<T extends keyof CanonicalIntent>(
 ): asserts intent is CanonicalIntent & Required<Pick<CanonicalIntent, T>> {
   const missing = fields.filter((field) => !intent[field]);
   if (missing.length > 0) {
-    throw new Error(`MISSING_MM_CLI_FIELDS:${missing.join(",")}`);
+    throw new Error(`MISSING_MM_CLI_FIELDS:\${missing.join(",")}`);
   }
 }
 
@@ -279,7 +358,24 @@ function runMmCli(operation: MmCliOperation): Promise<{
         resolve({ stdout, stderr });
         return;
       }
-      reject(new Error(`MM_CLI_FAILED:${code}:${stderr}`));
+      
+      // DM-F3: Structured Failure Evidence Packet
+      const packet: EvidencePacket = {
+        command: \`\${operation.command} \${operation.args.join(" ")}\`,
+        exitCode: code,
+        stdout,
+        stderr,
+        invariantViolations: [],
+        timestamp: new Date().toISOString(),
+        requestId: operation.intent.userGoalId,
+      };
+
+      // Fire-and-forget audit log (simulated)
+      console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
+
+      const error = new Error(\`MM_CLI_FAILED:\${code}:\${stderr}\`);
+      (error as any).evidence = packet;
+      reject(error);
     });
   });
 }
