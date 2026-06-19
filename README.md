@@ -49,6 +49,8 @@ It signs only when all checks pass:
 3. A dry-run simulation passes.
 4. Recent wallet activity does not violate trajectory rules.
 5. The ledger state is consistent.
+6. Any wallet or market lock has an expiry lease.
+7. Any perps oracle price used for simulation is fresh enough.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -145,7 +147,9 @@ Included:
 - default trajectory invariant checks
 - reconciliation helpers for wallet requests and perps venue state
 - durable-ledger and lock-scope checks to prevent reboot amnesia
+- atomic distributed lock requirements with TTL-based lock leases
 - Hyperliquid perps margin-model helpers for non-EVM simulation paths
+- oracle freshness checks for Hyperliquid mark/index price inputs
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -184,8 +188,20 @@ That means:
 - unknown check: do not sign
 - unavailable simulation: do not sign
 - ledger conflict: do not sign
+- missing lock lease: do not sign
+- stale oracle price: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
+
+## Supabase Note
+
+`sql/supabase.sql` is only a schema template. This repository does not include
+any Supabase project URL, API key, wallet secret, or shared database.
+
+If someone uses Supabase, they create their own private Supabase project and run
+the SQL there. Production deployments should keep service-role credentials on
+the server side only and enable appropriate row-level security for any user
+facing access.
 
 ## Roadmap
 

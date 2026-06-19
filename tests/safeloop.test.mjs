@@ -157,6 +157,41 @@ test("requires a durable atomic ledger before signing", async () => {
   );
 });
 
+test("requires lock leases for distributed signing", async () => {
+  const unsafeLedger = {
+    capabilities: { durable: true, atomicLocks: true, lockLeases: false },
+    tryLock: async () => true,
+    markStatus: async () => {},
+    recentForWallet: async () => [],
+  };
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: {
+          userGoalId: "leased-lock",
+          wallet: "0x0000000000000000000000000000000000000001",
+          chainId: 1,
+          actionType: "swap",
+          assetIn: "eth",
+          assetOut: "usdc",
+          amountIn: "1",
+        },
+        ledger: unsafeLedger,
+        mmaw: {
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => ({}),
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("LOCK_LEASE_REQUIRED"),
+  );
+});
+
 test("detects active lock-scope overlap before reconciliation completes", () => {
   const current = row({
     actionType: "perps_open",
@@ -183,11 +218,48 @@ test("detects active lock-scope overlap before reconciliation completes", () => 
       venueSimulation: "hyperliquid-margin-model",
       marginRatioBps: 20_000,
       liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
     },
     policy: defaultPolicy,
   });
 
   assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("does not block a scope forever after a prior lock lease expires", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "spcx",
+    side: "long",
+    size: "10",
+    leverage: "3",
+  });
+  current.lockScope = makeLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = {
+    ...current,
+    intentId: "prior",
+    idempotencyKey: "prior-key",
+    status: "BROADCASTING",
+    lockedUntil: new Date(Date.now() - 60_000).toISOString(),
+  };
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("OVER_ALLOCATION_RISK"));
 });
 
 test("flags unsafe Hyperliquid perps risk model output", () => {
@@ -198,19 +270,67 @@ test("flags unsafe Hyperliquid perps risk model output", () => {
       newOrderNotionalUsd: "1000",
       leverage: "20",
       markPrice: "100",
+      markPriceObservedAt: new Date().toISOString(),
       liquidationPrice: "99",
       maxSlippageUsd: "2",
       estimatedFeesUsd: "1",
     },
     minMarginRatioBps: 25_000,
     minLiquidationBufferBps: 200,
+    maxOracleAgeMs: defaultPolicy.maxOracleAgeMs,
   });
 
-  const simulationPatch = hyperliquidRiskToSimulation(risk);
+  const simulationPatch = hyperliquidRiskToSimulation(risk, {
+    markPriceObservedAt: new Date().toISOString(),
+  });
   assert.ok(simulationPatch.venueReasonCodes.includes("MARGIN_RATIO_LIMIT"));
   assert.ok(
     simulationPatch.venueReasonCodes.includes("LIQUIDATION_PRICE_TOO_CLOSE"),
   );
+});
+
+test("flags stale Hyperliquid oracle input before perps signing", () => {
+  const staleObservedAt = new Date(Date.now() - 60_000).toISOString();
+  const risk = simulateHyperliquidPerpsRisk({
+    input: {
+      accountEquityUsd: "1000",
+      existingNotionalUsd: "0",
+      newOrderNotionalUsd: "1000",
+      leverage: "2",
+      markPrice: "100",
+      markPriceObservedAt: staleObservedAt,
+      liquidationPrice: "60",
+    },
+    minMarginRatioBps: defaultPolicy.minMarginRatioBps,
+    minLiquidationBufferBps: defaultPolicy.minLiquidationBufferBps,
+    maxOracleAgeMs: defaultPolicy.maxOracleAgeMs,
+  });
+
+  const simulationPatch = hyperliquidRiskToSimulation(risk, {
+    markPriceObservedAt: staleObservedAt,
+    oracleSource: "hyperliquid-mark-price",
+  });
+
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "spcx",
+    side: "long",
+    size: "10",
+    leverage: "2",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      ...simulationPatch,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("ORACLE_PRICE_STALE"));
 });
 
 function row(overrides) {

@@ -62,8 +62,12 @@ export type AbortReason =
   | "BROADCAST_TRACKING_EXPIRED"
   | "HUMAN_APPROVAL_REQUIRED"
   | "DURABLE_LEDGER_REQUIRED"
+  | "ATOMIC_LOCK_REQUIRED"
+  | "LOCK_LEASE_REQUIRED"
+  | "LOCK_LEASE_EXPIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
+  | "ORACLE_PRICE_STALE"
   | "NON_EVM_SIMULATION_REQUIRED"
   | "MARGIN_RATIO_LIMIT"
   | "LIQUIDATION_PRICE_TOO_CLOSE"
@@ -123,6 +127,7 @@ export type ActionLedgerRow = CanonicalIntent & {
   pollingId?: string;
   txHash?: `0x${string}`;
   lockScope?: string;
+  lockedUntil?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -140,6 +145,8 @@ export type SimulationResult = {
   broadcastStatus?: "broadcasting" | "expired" | "landed" | "unknown";
   requiresHumanApproval?: boolean;
   reconciledAt?: string;
+  oracleObservedAt?: string;
+  oracleSource?: string;
   venueSimulation?: "evm" | "hyperliquid-margin-model" | "hyperliquid-api" | "unknown";
   marginRatioBps?: number;
   liquidationBufferBps?: number;
@@ -163,6 +170,7 @@ export type Ledger = {
   capabilities?: {
     durable: boolean;
     atomicLocks: boolean;
+    lockLeases?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   markStatus(
@@ -201,6 +209,8 @@ export type SafeloopPolicy = {
   hip3SymbolsRequireDex: string[];
   requireDurableLedger: boolean;
   maxReconciliationAgeMs: number;
+  lockLeaseMs: number;
+  maxOracleAgeMs: number;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
 };
@@ -217,6 +227,8 @@ export const defaultPolicy: SafeloopPolicy = {
   hip3SymbolsRequireDex: ["SPCX"],
   requireDurableLedger: true,
   maxReconciliationAgeMs: 30_000,
+  lockLeaseMs: 120_000,
+  maxOracleAgeMs: 5_000,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
 };
@@ -333,12 +345,18 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   const lockScope = makeLockScope(canonicalIntent);
   const now = new Date().toISOString();
 
-  if (
-    policy.requireDurableLedger &&
-    (!params.ledger.capabilities?.durable ||
-      !params.ledger.capabilities?.atomicLocks)
-  ) {
-    throw new SafeloopAbort(["DURABLE_LEDGER_REQUIRED"]);
+  if (policy.requireDurableLedger) {
+    const ledgerReasons: AbortReason[] = [];
+    if (!params.ledger.capabilities?.durable) {
+      ledgerReasons.push("DURABLE_LEDGER_REQUIRED");
+    }
+    if (!params.ledger.capabilities?.atomicLocks) {
+      ledgerReasons.push("ATOMIC_LOCK_REQUIRED");
+    }
+    if (!params.ledger.capabilities?.lockLeases) {
+      ledgerReasons.push("LOCK_LEASE_REQUIRED");
+    }
+    if (ledgerReasons.length > 0) throw new SafeloopAbort(ledgerReasons);
   }
 
   const row: ActionLedgerRow = {
@@ -351,6 +369,7 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     quoteId: canonicalIntent.quoteId,
     pollingId: canonicalIntent.pollingId,
     txHash: canonicalIntent.txHash,
+    lockedUntil: new Date(Date.now() + policy.lockLeaseMs).toISOString(),
     createdAt: now,
     updatedAt: now,
   };
@@ -364,13 +383,20 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     throw new SafeloopAbort(["LEDGER_LOCK_CONFLICT", "INTENT_LOCK_REQUIRED"]);
   }
 
-  const unsignedOperation =
-    await params.mmaw.buildUnsignedOperation(canonicalIntent);
-
-  const simulation = await params.simulator.simulate(
-    unsignedOperation,
-    canonicalIntent,
-  );
+  let unsignedOperation: TUnsignedOperation;
+  let simulation: SimulationResult;
+  try {
+    unsignedOperation = await params.mmaw.buildUnsignedOperation(canonicalIntent);
+    simulation = await params.simulator.simulate(
+      unsignedOperation,
+      canonicalIntent,
+    );
+  } catch (error) {
+    await params.ledger.markStatus(intentId, "ABORTED", [
+      "SIMULATION_UNAVAILABLE",
+    ]);
+    throw error;
+  }
 
   await params.ledger.markStatus(intentId, "SIMULATED");
 
@@ -443,6 +469,9 @@ export function checkTrajectoryInvariants(params: {
   if (simulation.reconciledAt && isStaleObservation(simulation.reconciledAt, policy)) {
     reasons.add("STALE_RECONCILIATION");
   }
+  if (current.lockedUntil && isExpired(current.lockedUntil)) {
+    reasons.add("LOCK_LEASE_EXPIRED");
+  }
   if (current.actionType.startsWith("perps_")) {
     if (
       !simulation.venueSimulation ||
@@ -462,6 +491,15 @@ export function checkTrajectoryInvariants(params: {
       simulation.liquidationBufferBps < policy.minLiquidationBufferBps
     ) {
       reasons.add("LIQUIDATION_PRICE_TOO_CLOSE");
+    }
+    if (
+      !simulation.oracleObservedAt ||
+      isStaleObservation(simulation.oracleObservedAt, {
+        ...policy,
+        maxReconciliationAgeMs: policy.maxOracleAgeMs,
+      })
+    ) {
+      reasons.add("ORACLE_PRICE_STALE");
     }
     for (const reason of simulation.venueReasonCodes ?? []) {
       reasons.add(reason);
@@ -493,7 +531,8 @@ export function checkTrajectoryInvariants(params: {
     (row) =>
       row.lockScope === current.lockScope &&
       row.intentId !== current.intentId &&
-      isActiveOrFinalDuplicate(row.status),
+      isActiveOrFinalDuplicate(row.status) &&
+      isLockLeaseActive(row),
   );
   if (activeSameScope) reasons.add("OVER_ALLOCATION_RISK");
 
@@ -595,6 +634,17 @@ function isStaleObservation(observedAt: string, policy: SafeloopPolicy): boolean
   const observedMs = Date.parse(observedAt);
   if (!Number.isFinite(observedMs)) return true;
   return Date.now() - observedMs > policy.maxReconciliationAgeMs;
+}
+
+function isExpired(iso: string): boolean {
+  const expiresMs = Date.parse(iso);
+  if (!Number.isFinite(expiresMs)) return true;
+  return Date.now() > expiresMs;
+}
+
+function isLockLeaseActive(row: ActionLedgerRow): boolean {
+  if (!row.lockedUntil) return true;
+  return !isExpired(row.lockedUntil);
 }
 
 function isActiveOrFinalDuplicate(status: LedgerStatus): boolean {

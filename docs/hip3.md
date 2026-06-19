@@ -93,6 +93,7 @@ Recommended invariants:
 - reject testnet deposits when the USDC source is not the Hyperliquid-compatible token
 - reject perps actions without a Hyperliquid-aware risk simulation
 - reject margin ratios and liquidation buffers below policy
+- reject perps simulations that use stale mark/index price observations
 
 ## Operational Notes
 
@@ -100,4 +101,6 @@ Recommended invariants:
 - Prefer `mm perps markets --dex <name>` before opening builder DEX markets.
 - Prefer `mm perps positions`, `orders`, and `balance` after every signed perps action.
 - Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeout states as unresolved, not failed success.
+- Keep the lock scope leased until wallet request and venue reconciliation finish.
+- Require fresh Hyperliquid mark/index price inputs for every margin simulation.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.

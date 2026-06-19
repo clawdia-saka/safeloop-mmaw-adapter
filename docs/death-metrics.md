@@ -101,3 +101,75 @@ Implementation hook:
 - `QUOTE_ONLY_NOT_EXECUTED`
 - `POSITION_NOT_RECONCILED`
 
+## DM-5: Deadlock Orphaning
+
+Scenario:
+
+```text
+worker acquires a market lock
+worker crashes during simulation or broadcast
+the unlock code never runs
+all future intents for that market are blocked
+```
+
+Required guard:
+
+- Locks must have a TTL lease.
+- Terminal statuses must release the lock.
+- Expired locks must be ignored or cleaned before a new lock attempt.
+
+Implementation hook:
+
+- `ActionLedgerRow.lockedUntil`
+- `Ledger.capabilities.lockLeases`
+- `LOCK_LEASE_REQUIRED`
+- `LOCK_LEASE_EXPIRED`
+- `safeloop_action_locks`
+
+## DM-6: Split-Brain Lock Race
+
+Scenario:
+
+```text
+two serverless workers receive the same market intent
+both SELECT the ledger before either writes
+both think the scope is free
+both sign before reconciliation completes
+```
+
+Required guard:
+
+- Lock acquisition must be atomic at the storage layer.
+- Do not implement production locking as `SELECT` then `INSERT`.
+- Use a database constraint, transaction, advisory lock, or equivalent Redis
+  lock primitive.
+
+Implementation hook:
+
+- `Ledger.capabilities.atomicLocks`
+- `ATOMIC_LOCK_REQUIRED`
+- `safeloop_try_lock_action(...)`
+
+## DM-7: Oracle Latency Desync
+
+Scenario:
+
+```text
+agent simulates a perps order
+mark price input is old
+volatility moves the liquidation range
+the stale simulation says safe
+the live market liquidates the position
+```
+
+Required guard:
+
+- Perps simulations must include price observation timestamps.
+- Stale or missing oracle timestamps must fail closed.
+- The policy must define `maxOracleAgeMs`.
+
+Implementation hook:
+
+- `SimulationResult.oracleObservedAt`
+- `SafeloopPolicy.maxOracleAgeMs`
+- `ORACLE_PRICE_STALE`

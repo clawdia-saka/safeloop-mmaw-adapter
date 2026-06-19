@@ -8,6 +8,8 @@ export type HyperliquidPerpsRiskInput = {
   maxSlippageUsd?: string;
   estimatedFeesUsd?: string;
   markPrice: string;
+  markPriceObservedAt: string;
+  oracleSource?: string;
   liquidationPrice?: string;
 };
 
@@ -23,6 +25,8 @@ export function simulateHyperliquidPerpsRisk(params: {
   input: HyperliquidPerpsRiskInput;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
+  maxOracleAgeMs: number;
+  now?: Date;
 }): HyperliquidPerpsRiskResult {
   const accountEquityUsd = parsePositive(params.input.accountEquityUsd);
   const existingNotionalUsd = parseMoney(params.input.existingNotionalUsd ?? "0");
@@ -46,6 +50,15 @@ export function simulateHyperliquidPerpsRisk(params: {
       : Number.POSITIVE_INFINITY;
 
   const reasonCodes: AbortReason[] = [];
+  if (
+    isStaleOracle(
+      params.input.markPriceObservedAt,
+      params.now ?? new Date(),
+      params.maxOracleAgeMs,
+    )
+  ) {
+    reasonCodes.push("ORACLE_PRICE_STALE");
+  }
   if (marginRatioBps < params.minMarginRatioBps) {
     reasonCodes.push("MARGIN_RATIO_LIMIT");
   }
@@ -64,19 +77,34 @@ export function simulateHyperliquidPerpsRisk(params: {
 
 export function hyperliquidRiskToSimulation(
   risk: HyperliquidPerpsRiskResult,
+  input?: Pick<HyperliquidPerpsRiskInput, "markPriceObservedAt" | "oracleSource">,
 ): Pick<
   SimulationResult,
   | "venueSimulation"
   | "marginRatioBps"
   | "liquidationBufferBps"
+  | "oracleObservedAt"
+  | "oracleSource"
   | "venueReasonCodes"
 > {
   return {
     venueSimulation: "hyperliquid-margin-model",
     marginRatioBps: risk.marginRatioBps,
     liquidationBufferBps: risk.liquidationBufferBps,
+    oracleObservedAt: input?.markPriceObservedAt,
+    oracleSource: input?.oracleSource,
     venueReasonCodes: risk.reasonCodes,
   };
+}
+
+function isStaleOracle(
+  observedAt: string,
+  now: Date,
+  maxOracleAgeMs: number,
+): boolean {
+  const observedMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedMs)) return true;
+  return now.getTime() - observedMs > maxOracleAgeMs;
 }
 
 function parsePositive(value: string): number {
@@ -90,4 +118,3 @@ function parseMoney(value: string): number {
   if (!Number.isFinite(parsed)) throw new Error("INVALID_NUMBER");
   return parsed;
 }
-

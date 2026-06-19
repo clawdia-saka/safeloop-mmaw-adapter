@@ -29,6 +29,8 @@ Safeloop owns:
 - venue reconciliation for Hyperliquid positions, orders, and balances
 - durable idempotency and lock-scope enforcement before signing
 - non-EVM risk simulation for Hyperliquid perps
+- TTL-based lock leases to recover from crashed workers
+- oracle freshness checks for perps margin inputs
 
 ## Runtime Flow
 
@@ -112,11 +114,21 @@ In-memory idempotency caches are acceptable only for local demos because a proce
 Required properties:
 
 - unique `idempotencyKey`
-- unique active `lockScope`
+- atomic distributed lock acquisition for each active `lockScope`
+- TTL-based lock leases so crashed workers cannot brick a market forever
 - transactionally written before signing
 - retained across process restarts
 
 The Supabase/Postgres baseline is in `sql/supabase.sql`.
+
+The baseline uses a separate `safeloop_action_locks` table with `lock_scope` as
+the primary key. `safeloop_try_lock_action(...)` deletes expired locks and then
+inserts the ledger row and lock row in one transaction. Concurrent workers race
+against the database constraint, not against application-side `SELECT` logic.
+
+Supabase is an optional storage example, not a shared service operated by this
+repo. Each deployer must use their own project and keep database credentials out
+of public clients and source control.
 
 ## Default Invariants
 
@@ -171,6 +183,12 @@ Reject actions where estimated gas and slippage exceed the configured share of t
 ### Non-EVM Perps Simulation
 
 Reject HIP-3/perps actions when the only simulation result is EVM-based. Hyperliquid perps need either a venue API simulation or a local margin/liquidation risk model.
+
+### Oracle Freshness
+
+Reject perps simulations when mark price or index price input is missing a
+fresh timestamp. A margin calculation based on stale pricing is treated as
+unknown and therefore unsafe.
 
 ### NAV Guard
 
