@@ -94,8 +94,12 @@ Recommended invariants:
 - reject perps actions without a Hyperliquid-aware risk simulation
 - reject margin ratios and liquidation buffers below policy
 - reject perps simulations that use stale mark/index price observations
+- shrink oracle freshness windows during high-volatility moves
 - reject account-level margin health below policy even if the target market looks safe
 - reject cross-DEX parallel perps intents for the same account scope
+- reject cross-venue parallel intents that share the same collateral pool
+- require short-lived signed payloads so delayed mempool or sequencer replay cannot execute later
+- preserve native gas runway for emergency close/cancel flows
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -106,6 +110,10 @@ Recommended invariants:
 - Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeout states as unresolved, not failed success.
 - Keep the lock scope leased until wallet request and venue reconciliation finish.
 - Keep the account-wide lock leased across builder DEXs that share the same Hyperliquid subaccount.
+- Keep the global collateral lock leased across venues that share the same funding pool.
 - Require fresh Hyperliquid mark/index price inputs for every margin simulation.
+- Require volatility metadata so oracle freshness can tighten during fast markets.
+- Require signature expiry metadata such as a short timestamp or venue-native time-in-force.
+- Track native gas balance and recent gas burn before allowing new open actions.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.

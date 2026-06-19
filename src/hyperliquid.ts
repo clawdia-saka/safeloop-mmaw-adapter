@@ -11,6 +11,7 @@ export type HyperliquidPerpsRiskInput = {
   estimatedFeesUsd?: string;
   markPrice: string;
   markPriceObservedAt: string;
+  volatilityBps?: number;
   oracleSource?: string;
   liquidationPrice?: string;
 };
@@ -119,7 +120,10 @@ export function simulateHyperliquidPerpsRisk(params: {
 
 export function hyperliquidRiskToSimulation(
   risk: HyperliquidPerpsRiskResult,
-  input?: Pick<HyperliquidPerpsRiskInput, "markPriceObservedAt" | "oracleSource">,
+  input?: Pick<
+    HyperliquidPerpsRiskInput,
+    "markPriceObservedAt" | "oracleSource" | "volatilityBps"
+  >,
 ): Pick<
   SimulationResult,
   | "venueSimulation"
@@ -130,6 +134,7 @@ export function hyperliquidRiskToSimulation(
   | "accountExposureUsd"
   | "oracleObservedAt"
   | "oracleSource"
+  | "volatilityBps"
   | "venueReasonCodes"
 > {
   return {
@@ -141,6 +146,7 @@ export function hyperliquidRiskToSimulation(
     accountExposureUsd: String(risk.accountExposureUsd),
     oracleObservedAt: input?.markPriceObservedAt,
     oracleSource: input?.oracleSource,
+    volatilityBps: input?.volatilityBps,
     venueReasonCodes: risk.reasonCodes,
   };
 }

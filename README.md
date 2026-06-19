@@ -53,6 +53,9 @@ It signs only when all checks pass:
 7. Any perps oracle price used for simulation is fresh enough.
 8. The signer still owns the lock immediately before signing.
 9. Perps risk is checked at the account level, not only per market.
+10. Signed payloads expire quickly enough to prevent ghost replay.
+11. Shared collateral is locked across venues.
+12. Native gas runway is preserved for emergency exits.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -107,6 +110,8 @@ It can reject:
 - token identity mistakes, such as using `USDC` when the CLI requires a contract address
 - account-wide perps risk that crosses builder DEX or market boundaries
 - stale signing transitions that require wallet request or tx history reconciliation before retry
+- long-lived signed transactions that could later replay from a mempool or sequencer queue
+- low native gas runway that would block emergency close/cancel actions
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -155,7 +160,10 @@ Included:
 - lock-owner verification immediately before signing
 - Hyperliquid perps margin-model helpers for non-EVM simulation paths
 - account-wide Hyperliquid health checks for cross-margin exposure
-- oracle freshness checks for Hyperliquid mark/index price inputs
+- dynamic oracle freshness checks for Hyperliquid mark/index price inputs
+- short signature expiry requirements for ghost transaction control
+- global collateral locks across venues that share the same funding pool
+- gas runway and burn-rate gates to preserve emergency close capacity
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -197,8 +205,10 @@ That means:
 - missing lock lease: do not sign
 - lost lock ownership: do not sign
 - unresolved prior signing transition: do not sign
+- missing or long-lived signature expiry: do not sign
 - unsafe account-wide perps health: do not sign
 - stale oracle price: do not sign
+- unsafe gas runway: do not sign new opens
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 

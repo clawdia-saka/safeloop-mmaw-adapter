@@ -27,6 +27,7 @@ const baseSimulation = {
   gasUsd: "0",
   slippageUsd: "0",
   maxLossUsd: "25",
+  signatureExpiresAt: new Date(Date.now() + 10_000).toISOString(),
 };
 
 test("qualifies HIP-3 symbols with builder DEX identity", () => {
@@ -202,6 +203,7 @@ test("verifies lock ownership immediately before signing", async () => {
       lockLeases: true,
       ownedLocks: true,
       accountScopedLocks: true,
+      globalCollateralLocks: true,
     },
     tryLock: async () => true,
     verifyLock: async () => false,
@@ -338,6 +340,49 @@ test("requires signature reconciliation before retrying a signing transition", (
   assert.ok(reasons.includes("SIGNATURE_RECONCILIATION_REQUIRED"));
 });
 
+test("requires cryptographic signature expiry before signing", () => {
+  const current = row({
+    actionType: "swap",
+    assetIn: "eth",
+    assetOut: "usdc",
+    amountIn: "1",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      signatureExpiresAt: undefined,
+      validUntilBlock: undefined,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("SIGNATURE_EXPIRY_REQUIRED"));
+});
+
+test("rejects long-lived ghost transaction signatures", () => {
+  const current = row({
+    actionType: "swap",
+    assetIn: "eth",
+    assetOut: "usdc",
+    amountIn: "1",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      signatureExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("SIGNATURE_EXPIRY_REQUIRED"));
+});
+
 test("locks account-wide perps risk across HIP-3 builder DEX scopes", () => {
   const current = row({
     actionType: "perps_open",
@@ -383,6 +428,53 @@ test("locks account-wide perps risk across HIP-3 builder DEX scopes", () => {
   assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
 });
 
+test("locks shared collateral across different venues", () => {
+  const current = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+  current.globalCollateralLockScope = "0x0000000000000000000000000000000000000001:main-usdc:global-collateral";
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "backpack",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
+  assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
 test("rejects unsafe account-wide Hyperliquid health", () => {
   const current = row({
     actionType: "perps_open",
@@ -410,6 +502,89 @@ test("rejects unsafe account-wide Hyperliquid health", () => {
   });
 
   assert.ok(reasons.includes("ACCOUNT_HEALTH_LIMIT"));
+});
+
+test("shrinks oracle freshness window during high volatility", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date(Date.now() - 1_000).toISOString(),
+      volatilityBps: defaultPolicy.oracleVolatilityThresholdBps,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("ORACLE_PRICE_STALE"));
+});
+
+test("blocks new opens when gas runway is too low", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      nativeBalanceUsd: "9",
+      estimatedMaxGasUsd: "1",
+      gasRunwayTransactions: 9,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("GAS_RUNWAY_LOW"));
+});
+
+test("allows emergency close to use reserved gas runway", () => {
+  const current = row({
+    actionType: "perps_close",
+    dex: "xyz",
+    symbol: "btc",
+    size: "1",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      nativeBalanceUsd: "1",
+      estimatedMaxGasUsd: "1",
+      gasRunwayTransactions: 1,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("GAS_RUNWAY_LOW"));
 });
 
 test("requires position size delta reconciliation for partial perps close", () => {

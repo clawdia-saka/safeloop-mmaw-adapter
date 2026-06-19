@@ -295,3 +295,104 @@ Implementation hook:
 - `safeloop_verify_action_lock(...)`
 - `LOCK_OWNERSHIP_REQUIRED`
 - `LOCK_OWNERSHIP_LOST`
+
+## DM-13: Oracle Frontrunning and Latency Arbitrage
+
+Scenario:
+
+```text
+oracle price is 4.9 seconds old
+market moves sharply during that window
+simulation still passes on the old price
+signed order executes at the new price
+account liquidates immediately
+```
+
+Required guard:
+
+- Oracle freshness cannot be a static time window only.
+- High-volatility observations must use a much shorter freshness window.
+- Missing volatility metadata should be treated conservatively by production
+  simulators.
+
+Implementation hook:
+
+- `SimulationResult.volatilityBps`
+- `SafeloopPolicy.highVolatilityOracleAgeMs`
+- `SafeloopPolicy.oracleVolatilityThresholdBps`
+- `ORACLE_PRICE_STALE`
+
+## DM-14: Cryptographic Ghost Transaction
+
+Scenario:
+
+```text
+transaction is signed
+RPC returns timeout or HTTP 500
+agent believes the transaction was not sent
+retry signs a second transaction
+the first signed payload later lands from a queue or mempool
+```
+
+Required guard:
+
+- Every signed payload must have a short cryptographic lifetime.
+- No-expiry signatures are unsafe for autonomous retry loops.
+- Retries must reconcile wallet requests and transaction history before signing.
+
+Implementation hook:
+
+- `SimulationResult.signatureExpiresAt`
+- `SimulationResult.validUntilBlock`
+- `SIGNATURE_EXPIRY_REQUIRED`
+- `SIGNATURE_EXPIRED`
+
+## DM-15: Cross-Venue Margin Blindspot
+
+Scenario:
+
+```text
+Backpack lane and Hyperliquid lane run at the same time
+each venue-specific check sees enough collateral
+both sign large positions
+combined portfolio leverage exceeds the real funding pool
+```
+
+Required guard:
+
+- Shared collateral must have a parent lock above venue-specific locks.
+- Parallel venues that depend on the same funding pool must serialize.
+
+Implementation hook:
+
+- `makeGlobalCollateralLockScope(...)`
+- `ActionLedgerRow.globalCollateralLockScope`
+- `Ledger.capabilities.globalCollateralLocks`
+- `GLOBAL_COLLATERAL_LOCK_REQUIRED`
+
+## DM-16: Silent Gas Suffocation
+
+Scenario:
+
+```text
+micro-adjustment loop burns native gas
+each trade passes margin checks
+native balance falls below emergency close runway
+market crashes
+close transaction fails for insufficient gas
+```
+
+Required guard:
+
+- New opens must stop when gas runway is too low.
+- Recent gas burn rate must have a policy cap.
+- Emergency close/cancel/withdraw actions can use reserved runway.
+
+Implementation hook:
+
+- `SimulationResult.nativeBalanceUsd`
+- `SimulationResult.estimatedMaxGasUsd`
+- `SimulationResult.gasRunwayTransactions`
+- `SimulationResult.gasSpentLookbackUsd`
+- `GAS_RUNWAY_LOW`
+- `GAS_BURN_RATE_LIMIT`

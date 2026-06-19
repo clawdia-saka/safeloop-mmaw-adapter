@@ -11,8 +11,10 @@ create table if not exists safeloop_action_ledger (
   polling_id text,
   tx_hash text,
   account_lock_scope text,
+  global_collateral_lock_scope text,
   lock_owner_id text,
   locked_until timestamptz,
+  signature_expires_at timestamptz,
   canonical_intent jsonb not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -70,6 +72,7 @@ create or replace function safeloop_try_lock_action(
   p_idempotency_key text,
   p_lock_scope text,
   p_account_lock_scope text,
+  p_global_collateral_lock_scope text,
   p_lock_owner_id text,
   p_wallet text,
   p_chain_id integer,
@@ -89,6 +92,7 @@ begin
     idempotency_key,
     lock_scope,
     account_lock_scope,
+    global_collateral_lock_scope,
     lock_owner_id,
     wallet,
     chain_id,
@@ -102,6 +106,7 @@ begin
     p_idempotency_key,
     p_lock_scope,
     p_account_lock_scope,
+    p_global_collateral_lock_scope,
     p_lock_owner_id,
     p_wallet,
     p_chain_id,
@@ -139,6 +144,21 @@ begin
     );
   end if;
 
+  if p_global_collateral_lock_scope is not null then
+    insert into safeloop_action_locks (
+      lock_scope,
+      intent_id,
+      lock_owner_id,
+      locked_until
+    )
+    values (
+      p_global_collateral_lock_scope,
+      p_intent_id,
+      p_lock_owner_id,
+      p_locked_until
+    );
+  end if;
+
   return true;
 exception
   when unique_violation then
@@ -150,6 +170,7 @@ create or replace function safeloop_verify_action_lock(
   p_intent_id text,
   p_lock_scope text,
   p_account_lock_scope text,
+  p_global_collateral_lock_scope text,
   p_lock_owner_id text
 )
 returns boolean
@@ -170,6 +191,17 @@ as $$
       from safeloop_action_locks
       where intent_id = p_intent_id
         and lock_scope = p_account_lock_scope
+        and lock_owner_id = p_lock_owner_id
+        and locked_until > now()
+    )
+  )
+  and (
+    p_global_collateral_lock_scope is null
+    or exists (
+      select 1
+      from safeloop_action_locks
+      where intent_id = p_intent_id
+        and lock_scope = p_global_collateral_lock_scope
         and lock_owner_id = p_lock_owner_id
         and locked_until > now()
     )

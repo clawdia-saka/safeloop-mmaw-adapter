@@ -32,7 +32,10 @@ Safeloop owns:
 - TTL-based lock leases to recover from crashed workers
 - lock-owner verification before signing
 - account-wide lock scopes for cross-margin perps accounts
-- oracle freshness checks for perps margin inputs
+- global collateral lock scopes across venues
+- dynamic oracle freshness checks for perps margin inputs
+- short signature expiry enforcement
+- native gas runway protection
 
 ## Runtime Flow
 
@@ -119,6 +122,7 @@ Required properties:
 - unique `idempotencyKey`
 - atomic distributed lock acquisition for each active `lockScope`
 - atomic distributed lock acquisition for account-level perps scopes
+- atomic distributed lock acquisition for global collateral scopes
 - TTL-based lock leases so crashed workers cannot brick a market forever
 - lock ownership checks immediately before signing
 - transactionally written before signing
@@ -184,6 +188,10 @@ Reject a retry when a prior action is already in `APPROVED_FOR_SIGNING`,
 must reconcile wallet request status or tx history before creating another
 signature.
 
+Signed operations must also have a short cryptographic lifetime. If the
+operation has no expiry metadata, or the expiry exceeds policy, Safeloop treats
+the result as replayable and refuses to sign.
+
 ### Position Reconciliation
 
 For perps actions, require a post-action position, order, or balance check before marking the action successful.
@@ -207,11 +215,26 @@ liquidation buffer, or account exposure breaches policy. This blocks a
 single-market trade from ignoring cross-margin losses elsewhere in the same
 Hyperliquid subaccount.
 
+### Global Collateral Lock
+
+Reject parallel intents that share the same collateral pool even when they target
+different venues. The global collateral lock is a parent lock above market,
+builder DEX, and venue-specific account locks.
+
 ### Oracle Freshness
 
 Reject perps simulations when mark price or index price input is missing a
 fresh timestamp. A margin calculation based on stale pricing is treated as
 unknown and therefore unsafe.
+
+During high volatility, the allowed oracle age is reduced from
+`maxOracleAgeMs` to `highVolatilityOracleAgeMs`.
+
+### Gas Runway
+
+Reject new opens when native gas balance, estimated max gas cost, or recent gas
+burn rate leaves fewer than the configured number of emergency transactions.
+Close, cancel, and withdraw actions are allowed to use the reserved gas runway.
 
 ### NAV Guard
 
