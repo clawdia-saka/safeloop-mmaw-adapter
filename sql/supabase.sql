@@ -10,6 +10,8 @@ create table if not exists safeloop_action_ledger (
   quote_id text,
   polling_id text,
   tx_hash text,
+  account_lock_scope text,
+  lock_owner_id text,
   locked_until timestamptz,
   canonical_intent jsonb not null,
   created_at timestamptz not null default now(),
@@ -26,8 +28,9 @@ create index if not exists safeloop_action_ledger_wallet_chain_idx
 
 create table if not exists safeloop_action_locks (
   lock_scope text primary key,
-  intent_id text not null unique references safeloop_action_ledger(intent_id)
+  intent_id text not null references safeloop_action_ledger(intent_id)
     on delete cascade,
+  lock_owner_id text not null,
   locked_until timestamptz not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -66,6 +69,8 @@ create or replace function safeloop_try_lock_action(
   p_intent_id text,
   p_idempotency_key text,
   p_lock_scope text,
+  p_account_lock_scope text,
+  p_lock_owner_id text,
   p_wallet text,
   p_chain_id integer,
   p_action_type text,
@@ -83,6 +88,8 @@ begin
     intent_id,
     idempotency_key,
     lock_scope,
+    account_lock_scope,
+    lock_owner_id,
     wallet,
     chain_id,
     action_type,
@@ -94,6 +101,8 @@ begin
     p_intent_id,
     p_idempotency_key,
     p_lock_scope,
+    p_account_lock_scope,
+    p_lock_owner_id,
     p_wallet,
     p_chain_id,
     p_action_type,
@@ -105,19 +114,66 @@ begin
   insert into safeloop_action_locks (
     lock_scope,
     intent_id,
+    lock_owner_id,
     locked_until
   )
   values (
     p_lock_scope,
     p_intent_id,
+    p_lock_owner_id,
     p_locked_until
   );
+
+  if p_account_lock_scope is not null then
+    insert into safeloop_action_locks (
+      lock_scope,
+      intent_id,
+      lock_owner_id,
+      locked_until
+    )
+    values (
+      p_account_lock_scope,
+      p_intent_id,
+      p_lock_owner_id,
+      p_locked_until
+    );
+  end if;
 
   return true;
 exception
   when unique_violation then
     return false;
 end;
+$$;
+
+create or replace function safeloop_verify_action_lock(
+  p_intent_id text,
+  p_lock_scope text,
+  p_account_lock_scope text,
+  p_lock_owner_id text
+)
+returns boolean
+language sql
+as $$
+  select exists (
+    select 1
+    from safeloop_action_locks
+    where intent_id = p_intent_id
+      and lock_scope = p_lock_scope
+      and lock_owner_id = p_lock_owner_id
+      and locked_until > now()
+  )
+  and (
+    p_account_lock_scope is null
+    or exists (
+      select 1
+      from safeloop_action_locks
+      where intent_id = p_intent_id
+        and lock_scope = p_account_lock_scope
+        and lock_owner_id = p_lock_owner_id
+        and locked_until > now()
+    )
+  );
 $$;
 
 create or replace function safeloop_release_action_lock(p_intent_id text)

@@ -51,6 +51,8 @@ It signs only when all checks pass:
 5. The ledger state is consistent.
 6. Any wallet or market lock has an expiry lease.
 7. Any perps oracle price used for simulation is fresh enough.
+8. The signer still owns the lock immediately before signing.
+9. Perps risk is checked at the account level, not only per market.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -103,6 +105,8 @@ It can reject:
 - HIP-3 perps mistakes, such as opening on the wrong builder DEX market or retrying close/cancel loops
 - unresolved wallet request states, such as MFA wait, broadcast timeout, or quote-only execution
 - token identity mistakes, such as using `USDC` when the CLI requires a contract address
+- account-wide perps risk that crosses builder DEX or market boundaries
+- stale signing transitions that require wallet request or tx history reconciliation before retry
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -148,7 +152,9 @@ Included:
 - reconciliation helpers for wallet requests and perps venue state
 - durable-ledger and lock-scope checks to prevent reboot amnesia
 - atomic distributed lock requirements with TTL-based lock leases
+- lock-owner verification immediately before signing
 - Hyperliquid perps margin-model helpers for non-EVM simulation paths
+- account-wide Hyperliquid health checks for cross-margin exposure
 - oracle freshness checks for Hyperliquid mark/index price inputs
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
@@ -189,6 +195,9 @@ That means:
 - unavailable simulation: do not sign
 - ledger conflict: do not sign
 - missing lock lease: do not sign
+- lost lock ownership: do not sign
+- unresolved prior signing transition: do not sign
+- unsafe account-wide perps health: do not sign
 - stale oracle price: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success

@@ -94,6 +94,9 @@ Recommended invariants:
 - reject perps actions without a Hyperliquid-aware risk simulation
 - reject margin ratios and liquidation buffers below policy
 - reject perps simulations that use stale mark/index price observations
+- reject account-level margin health below policy even if the target market looks safe
+- reject cross-DEX parallel perps intents for the same account scope
+- require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
 
@@ -102,5 +105,7 @@ Recommended invariants:
 - Prefer `mm perps positions`, `orders`, and `balance` after every signed perps action.
 - Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeout states as unresolved, not failed success.
 - Keep the lock scope leased until wallet request and venue reconciliation finish.
+- Keep the account-wide lock leased across builder DEXs that share the same Hyperliquid subaccount.
 - Require fresh Hyperliquid mark/index price inputs for every margin simulation.
+- Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.

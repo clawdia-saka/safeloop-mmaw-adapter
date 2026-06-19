@@ -30,6 +30,8 @@ Safeloop owns:
 - durable idempotency and lock-scope enforcement before signing
 - non-EVM risk simulation for Hyperliquid perps
 - TTL-based lock leases to recover from crashed workers
+- lock-owner verification before signing
+- account-wide lock scopes for cross-margin perps accounts
 - oracle freshness checks for perps margin inputs
 
 ## Runtime Flow
@@ -51,10 +53,10 @@ Agent proposes intent
 ## Ledger State Machine
 
 ```text
-PLANNED -> LOCKED -> SIMULATED -> APPROVED_FOR_SIGNING -> SIGNED -> REQUEST_PENDING
-                                                             |            |
-                                                             v            v
-                                                        SIGN_FAILED   AWAITING_HUMAN_APPROVAL
+PLANNED -> LOCKED -> SIMULATED -> APPROVED_FOR_SIGNING -> SIGNING -> SIGNED -> REQUEST_PENDING
+                                                             |          |            |
+                                                             v          v            v
+                                                        ABORTED   SIGN_FAILED   AWAITING_HUMAN_APPROVAL
                                                                           |
                                                                           v
                                                                       SUBMITTED
@@ -77,6 +79,7 @@ ABORTED and REVERTED are terminal failure states.
 Rules:
 
 - `ABORTED` means Safeloop stopped the action before signing.
+- `SIGNING` means the lock owner was verified and signing is in progress.
 - `SIGN_FAILED` means signing was attempted but failed.
 - `AWAITING_HUMAN_APPROVAL` means Guard/MFA approval is still required.
 - `BROADCASTING` means the operation is not yet final and must not be counted as success.
@@ -115,7 +118,9 @@ Required properties:
 
 - unique `idempotencyKey`
 - atomic distributed lock acquisition for each active `lockScope`
+- atomic distributed lock acquisition for account-level perps scopes
 - TTL-based lock leases so crashed workers cannot brick a market forever
+- lock ownership checks immediately before signing
 - transactionally written before signing
 - retained across process restarts
 
@@ -172,9 +177,20 @@ Reject success claims when a route was quoted but never executed.
 
 Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeouts as unresolved or failed states. Do not mark the agent task complete from these statuses.
 
+### Signing Reconciliation
+
+Reject a retry when a prior action is already in `APPROVED_FOR_SIGNING`,
+`SIGNING`, `SIGNED`, or a submitted/broadcasting wallet state. The next worker
+must reconcile wallet request status or tx history before creating another
+signature.
+
 ### Position Reconciliation
 
 For perps actions, require a post-action position, order, or balance check before marking the action successful.
+
+For partial close and modify flows, a Boolean "position exists" check is not
+enough. Safeloop must compare expected and observed position size within a
+defined tolerance before marking venue reconciliation complete.
 
 ### Fee To Trade Value
 
@@ -183,6 +199,13 @@ Reject actions where estimated gas and slippage exceed the configured share of t
 ### Non-EVM Perps Simulation
 
 Reject HIP-3/perps actions when the only simulation result is EVM-based. Hyperliquid perps need either a venue API simulation or a local margin/liquidation risk model.
+
+### Account-Wide Perps Health
+
+Reject perps actions when the account-level margin ratio, account-level
+liquidation buffer, or account exposure breaches policy. This blocks a
+single-market trade from ignoring cross-margin losses elsewhere in the same
+Hyperliquid subaccount.
 
 ### Oracle Freshness
 

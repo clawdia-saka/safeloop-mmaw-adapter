@@ -21,6 +21,9 @@ export type WalletRequestObservation = {
 
 export type VenueObservation = {
   positionFound?: boolean;
+  expectedPositionSize?: string;
+  observedPositionSize?: string;
+  positionSizeTolerance?: string;
   orderFound?: boolean;
   balanceUpdated?: boolean;
 };
@@ -64,6 +67,13 @@ export function reconcileVenueState(
 ): ReconciliationDecision {
   if (!actionType.startsWith("perps_")) return terminal("CONFIRMED");
 
+  if (requiresPositionDelta(actionType, observation)) {
+    if (matchesExpectedPositionSize(observation)) {
+      return terminal("VENUE_RECONCILED");
+    }
+    return pending("REQUEST_WATCH_REQUIRED", ["POSITION_DELTA_MISMATCH"]);
+  }
+
   if (actionType === "perps_open" && observation.positionFound) {
     return terminal("VENUE_RECONCILED");
   }
@@ -83,6 +93,35 @@ export function reconcileVenueState(
   return pending("REQUEST_WATCH_REQUIRED", ["POSITION_NOT_RECONCILED"]);
 }
 
+function requiresPositionDelta(
+  actionType: string,
+  observation: VenueObservation,
+): boolean {
+  return (
+    ["perps_open", "perps_close", "perps_modify"].includes(actionType) &&
+    observation.expectedPositionSize !== undefined
+  );
+}
+
+function matchesExpectedPositionSize(observation: VenueObservation): boolean {
+  if (observation.observedPositionSize === undefined) return false;
+
+  const expected = parseDecimal(observation.expectedPositionSize);
+  const observed = parseDecimal(observation.observedPositionSize);
+  const tolerance = parseDecimal(observation.positionSizeTolerance ?? "0");
+  if (expected === undefined || observed === undefined || tolerance === undefined) {
+    return false;
+  }
+
+  return Math.abs(expected - observed) <= tolerance;
+}
+
+function parseDecimal(value?: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 function pending(
   status: LedgerStatus,
   reasonCodes: AbortReason[] = [],
@@ -96,4 +135,3 @@ function terminal(
 ): ReconciliationDecision {
   return { status, reasonCodes, terminal: true };
 }
-

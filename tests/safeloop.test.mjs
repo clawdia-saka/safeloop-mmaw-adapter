@@ -6,6 +6,7 @@ import {
   checkTrajectoryInvariants,
   defaultPolicy,
   failClosedSign,
+  makeAccountLockScope,
   makeLockScope,
   qualifyHip3Symbol,
   reconcileVenueState,
@@ -192,6 +193,54 @@ test("requires lock leases for distributed signing", async () => {
   );
 });
 
+test("verifies lock ownership immediately before signing", async () => {
+  let signCalled = false;
+  const ledger = {
+    capabilities: {
+      durable: true,
+      atomicLocks: true,
+      lockLeases: true,
+      ownedLocks: true,
+      accountScopedLocks: true,
+    },
+    tryLock: async () => true,
+    verifyLock: async () => false,
+    markStatus: async () => {},
+    recentForWallet: async () => [],
+  };
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: {
+          userGoalId: "lost-owner",
+          wallet: "0x0000000000000000000000000000000000000001",
+          chainId: 1,
+          actionType: "swap",
+          assetIn: "eth",
+          assetOut: "usdc",
+          amountIn: "1",
+        },
+        ledger,
+        mmaw: {
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => {
+            signCalled = true;
+            return {};
+          },
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("LOCK_OWNERSHIP_LOST"),
+  );
+
+  assert.equal(signCalled, false);
+});
+
 test("detects active lock-scope overlap before reconciliation completes", () => {
   const current = row({
     actionType: "perps_open",
@@ -260,6 +309,129 @@ test("does not block a scope forever after a prior lock lease expires", () => {
   });
 
   assert.ok(!reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("requires signature reconciliation before retrying a signing transition", () => {
+  const current = row({
+    actionType: "swap",
+    assetIn: "eth",
+    assetOut: "usdc",
+    amountIn: "1",
+  });
+  current.lockScope = makeLockScope(current);
+
+  const prior = {
+    ...current,
+    intentId: "prior",
+    idempotencyKey: "prior-key",
+    status: "SIGNING",
+    lockedUntil: new Date(Date.now() - 60_000).toISOString(),
+  };
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: baseSimulation,
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("SIGNATURE_RECONCILIATION_REQUIRED"));
+});
+
+test("locks account-wide perps risk across HIP-3 builder DEX scopes", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "dex-a",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+  current.lockScope = makeLockScope(current);
+  current.accountLockScope = makeAccountLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.lockScope = makeLockScope(prior);
+  prior.accountLockScope = makeAccountLockScope(prior);
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("ACCOUNT_LOCK_REQUIRED"));
+  assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("rejects unsafe account-wide Hyperliquid health", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      accountMarginRatioBps: 1_000,
+      accountLiquidationBufferBps: 100,
+      accountExposureUsd: "20000",
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("ACCOUNT_HEALTH_LIMIT"));
+});
+
+test("requires position size delta reconciliation for partial perps close", () => {
+  const decision = reconcileVenueState("perps_close", {
+    positionFound: true,
+    expectedPositionSize: "1",
+    observedPositionSize: "2",
+  });
+
+  assert.equal(decision.status, "REQUEST_WATCH_REQUIRED");
+  assert.ok(decision.reasonCodes.includes("POSITION_DELTA_MISMATCH"));
+});
+
+test("accepts exact position size delta reconciliation", () => {
+  const decision = reconcileVenueState("perps_close", {
+    positionFound: true,
+    expectedPositionSize: "1",
+    observedPositionSize: "1.0001",
+    positionSizeTolerance: "0.001",
+  });
+
+  assert.equal(decision.status, "VENUE_RECONCILED");
 });
 
 test("flags unsafe Hyperliquid perps risk model output", () => {

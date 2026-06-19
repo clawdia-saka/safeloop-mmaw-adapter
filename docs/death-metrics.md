@@ -173,3 +173,125 @@ Implementation hook:
 - `SimulationResult.oracleObservedAt`
 - `SafeloopPolicy.maxOracleAgeMs`
 - `ORACLE_PRICE_STALE`
+
+## DM-8: Race-to-Sign Replay Gap
+
+Scenario:
+
+```text
+ledger moves to APPROVED_FOR_SIGNING
+signer creates a signature
+worker crashes before ledger reaches SIGNED
+retry starts without wallet request or tx history reconciliation
+the same goal signs again
+```
+
+Required guard:
+
+- A signing transition must be treated as unresolved until reconciled.
+- Retries must check prior `APPROVED_FOR_SIGNING`, `SIGNING`, `SIGNED`,
+  submitted, and broadcasting states.
+- The signer must still own the active lock immediately before signing.
+
+Implementation hook:
+
+- `SIGNING`
+- `SIGNATURE_RECONCILIATION_REQUIRED`
+- `Ledger.verifyLock(...)`
+- `LOCK_OWNERSHIP_LOST`
+
+## DM-9: Ghost Position Risk
+
+Scenario:
+
+```text
+account has a 2 ETH long perp
+agent tries to partially close 1 ETH
+position still exists after the close
+Boolean positionFound remains true
+agent retries and flips the position
+```
+
+Required guard:
+
+- Venue reconciliation must compare expected and observed position size.
+- Partial close and modify flows cannot rely on `positionFound` alone.
+- A mismatch stays pending instead of becoming success.
+
+Implementation hook:
+
+- `VenueObservation.expectedPositionSize`
+- `VenueObservation.observedPositionSize`
+- `POSITION_DELTA_MISMATCH`
+
+## DM-10: Cross-Margin Contagion
+
+Scenario:
+
+```text
+BTC trade looks safe in isolation
+ETH and alt positions share the same Hyperliquid account margin
+account health is already near liquidation
+the BTC signature triggers account-wide liquidation
+```
+
+Required guard:
+
+- Hyperliquid perps simulation must include account-wide health.
+- Policy must check account margin ratio, account liquidation buffer, and max
+  account exposure.
+
+Implementation hook:
+
+- `SimulationResult.accountMarginRatioBps`
+- `SimulationResult.accountLiquidationBufferBps`
+- `SimulationResult.accountExposureUsd`
+- `ACCOUNT_HEALTH_LIMIT`
+
+## DM-11: Scope Shadowing Across Builder DEXs
+
+Scenario:
+
+```text
+dex-a:BTC lock succeeds
+dex-b:ETH lock also succeeds
+both workers evaluate old account NAV
+combined exposure breaches account risk budget
+```
+
+Required guard:
+
+- Perps flows need both market-level and account-level lock scopes.
+- Builder DEX identity should not bypass account-wide exposure controls.
+
+Implementation hook:
+
+- `makeAccountLockScope(...)`
+- `ActionLedgerRow.accountLockScope`
+- `Ledger.capabilities.accountScopedLocks`
+- `ACCOUNT_LOCK_REQUIRED`
+
+## DM-12: Lock Ownership Stealing
+
+Scenario:
+
+```text
+worker A acquires a leased lock
+simulation takes longer than the lease
+worker B acquires the expired lock
+worker A resumes and signs without noticing ownership was lost
+```
+
+Required guard:
+
+- Locks need an owner ID, not only a scope and expiry.
+- The owner must be verified after simulation and immediately before signing.
+- Lost ownership fails closed.
+
+Implementation hook:
+
+- `ActionLedgerRow.lockOwnerId`
+- `Ledger.capabilities.ownedLocks`
+- `safeloop_verify_action_lock(...)`
+- `LOCK_OWNERSHIP_REQUIRED`
+- `LOCK_OWNERSHIP_LOST`

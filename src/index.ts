@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { canonicalizePerpsFields } from "./hip3.js";
 
@@ -26,6 +26,7 @@ export type LedgerStatus =
   | "LOCKED"
   | "SIMULATED"
   | "APPROVED_FOR_SIGNING"
+  | "SIGNING"
   | "SIGNED"
   | "REQUEST_PENDING"
   | "REQUEST_WATCH_REQUIRED"
@@ -57,6 +58,7 @@ export type AbortReason =
   | "TESTNET_USDC_MISMATCH"
   | "QUOTE_ONLY_NOT_EXECUTED"
   | "POSITION_NOT_RECONCILED"
+  | "POSITION_DELTA_MISMATCH"
   | "GAS_EXCEEDS_TRADE_VALUE"
   | "BROADCASTING_TIMEOUT"
   | "BROADCAST_TRACKING_EXPIRED"
@@ -65,12 +67,17 @@ export type AbortReason =
   | "ATOMIC_LOCK_REQUIRED"
   | "LOCK_LEASE_REQUIRED"
   | "LOCK_LEASE_EXPIRED"
+  | "LOCK_OWNERSHIP_REQUIRED"
+  | "LOCK_OWNERSHIP_LOST"
+  | "ACCOUNT_LOCK_REQUIRED"
+  | "SIGNATURE_RECONCILIATION_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
   | "ORACLE_PRICE_STALE"
   | "NON_EVM_SIMULATION_REQUIRED"
   | "MARGIN_RATIO_LIMIT"
   | "LIQUIDATION_PRICE_TOO_CLOSE"
+  | "ACCOUNT_HEALTH_LIMIT"
   | "OVER_ALLOCATION_RISK"
   | "UNKNOWN_STATE";
 
@@ -97,6 +104,7 @@ export type AgentIntent = {
   requiresDex?: boolean;
   venue?: "hyperliquid";
   network?: "mainnet" | "testnet";
+  accountId?: string;
   dex?: string;
   symbol?: string;
   side?: "long" | "short";
@@ -127,6 +135,8 @@ export type ActionLedgerRow = CanonicalIntent & {
   pollingId?: string;
   txHash?: `0x${string}`;
   lockScope?: string;
+  accountLockScope?: string;
+  lockOwnerId?: string;
   lockedUntil?: string;
   createdAt: string;
   updatedAt: string;
@@ -150,6 +160,9 @@ export type SimulationResult = {
   venueSimulation?: "evm" | "hyperliquid-margin-model" | "hyperliquid-api" | "unknown";
   marginRatioBps?: number;
   liquidationBufferBps?: number;
+  accountMarginRatioBps?: number;
+  accountLiquidationBufferBps?: number;
+  accountExposureUsd?: string;
   venueReasonCodes?: AbortReason[];
   reason?: string;
 };
@@ -171,8 +184,11 @@ export type Ledger = {
     durable: boolean;
     atomicLocks: boolean;
     lockLeases?: boolean;
+    ownedLocks?: boolean;
+    accountScopedLocks?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
+  verifyLock?(row: ActionLedgerRow): Promise<boolean>;
   markStatus(
     intentId: string,
     status: LedgerStatus,
@@ -213,6 +229,10 @@ export type SafeloopPolicy = {
   maxOracleAgeMs: number;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
+  requireAccountWideLock: boolean;
+  minAccountMarginRatioBps: number;
+  minAccountLiquidationBufferBps: number;
+  maxAccountExposureUsd: string;
 };
 
 export const defaultPolicy: SafeloopPolicy = {
@@ -231,6 +251,10 @@ export const defaultPolicy: SafeloopPolicy = {
   maxOracleAgeMs: 5_000,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
+  requireAccountWideLock: true,
+  minAccountMarginRatioBps: 12_500,
+  minAccountLiquidationBufferBps: 500,
+  maxAccountExposureUsd: "10000",
 };
 
 export class SafeloopAbort extends Error {
@@ -276,6 +300,7 @@ export function canonicalizeIntent(
     tokenSymbol: intent.tokenSymbol?.toUpperCase(),
     isTestnetUsdc: intent.isTestnetUsdc,
     requiresDex: intent.requiresDex,
+    accountId: intent.accountId?.toLowerCase(),
     ...canonicalizePerpsFields(intent),
     roundedAmountBucket: roundAmountBucket(intent.amountIn ?? intent.size),
     timeBucket,
@@ -296,6 +321,7 @@ export function makeIdempotencyKey(intent: CanonicalIntent): string {
       tokenContract: intent.tokenContract,
       tokenSymbol: intent.tokenSymbol,
       dex: intent.dex,
+      accountId: intent.accountId,
       network: intent.network,
       orderId: intent.orderId,
       orderType: intent.orderType,
@@ -329,6 +355,21 @@ export function makeLockScope(intent: CanonicalIntent): string {
     .toLowerCase();
 }
 
+export function makeAccountLockScope(
+  intent: CanonicalIntent,
+): string | undefined {
+  if (!intent.actionType.startsWith("perps_")) return undefined;
+  return [
+    intent.wallet,
+    intent.chainId,
+    intent.venue ?? "hyperliquid",
+    intent.accountId ?? "default",
+    "account",
+  ]
+    .join(":")
+    .toLowerCase();
+}
+
 export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   params: {
     intent: AgentIntent;
@@ -343,6 +384,7 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   const intentId = sha256(stableJson(canonicalIntent));
   const idempotencyKey = makeIdempotencyKey(canonicalIntent);
   const lockScope = makeLockScope(canonicalIntent);
+  const accountLockScope = makeAccountLockScope(canonicalIntent);
   const now = new Date().toISOString();
 
   if (policy.requireDurableLedger) {
@@ -355,6 +397,16 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     }
     if (!params.ledger.capabilities?.lockLeases) {
       ledgerReasons.push("LOCK_LEASE_REQUIRED");
+    }
+    if (!params.ledger.capabilities?.ownedLocks || !params.ledger.verifyLock) {
+      ledgerReasons.push("LOCK_OWNERSHIP_REQUIRED");
+    }
+    if (
+      policy.requireAccountWideLock &&
+      canonicalIntent.actionType.startsWith("perps_") &&
+      !params.ledger.capabilities?.accountScopedLocks
+    ) {
+      ledgerReasons.push("ACCOUNT_LOCK_REQUIRED");
     }
     if (ledgerReasons.length > 0) throw new SafeloopAbort(ledgerReasons);
   }
@@ -369,6 +421,8 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     quoteId: canonicalIntent.quoteId,
     pollingId: canonicalIntent.pollingId,
     txHash: canonicalIntent.txHash,
+    accountLockScope,
+    lockOwnerId: randomUUID(),
     lockedUntil: new Date(Date.now() + policy.lockLeaseMs).toISOString(),
     createdAt: now,
     updatedAt: now,
@@ -431,6 +485,9 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   }
 
   await params.ledger.markStatus(intentId, "APPROVED_FOR_SIGNING");
+  await verifyActiveLockOwnership(params.ledger, row);
+  await params.ledger.markStatus(intentId, "SIGNING");
+  await verifyActiveLockOwnership(params.ledger, row);
 
   try {
     const signed = await params.mmaw.sign(unsignedOperation);
@@ -439,6 +496,14 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   } catch (error) {
     await params.ledger.markStatus(intentId, "SIGN_FAILED", ["UNKNOWN_STATE"]);
     throw error;
+  }
+}
+
+async function verifyActiveLockOwnership(ledger: Ledger, row: ActionLedgerRow) {
+  const ownsLock = await ledger.verifyLock?.(row);
+  if (!ownsLock) {
+    await ledger.markStatus(row.intentId, "ABORTED", ["LOCK_OWNERSHIP_LOST"]);
+    throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
   }
 }
 
@@ -493,6 +558,25 @@ export function checkTrajectoryInvariants(params: {
       reasons.add("LIQUIDATION_PRICE_TOO_CLOSE");
     }
     if (
+      simulation.accountMarginRatioBps !== undefined &&
+      simulation.accountMarginRatioBps < policy.minAccountMarginRatioBps
+    ) {
+      reasons.add("ACCOUNT_HEALTH_LIMIT");
+    }
+    if (
+      simulation.accountLiquidationBufferBps !== undefined &&
+      simulation.accountLiquidationBufferBps <
+        policy.minAccountLiquidationBufferBps
+    ) {
+      reasons.add("ACCOUNT_HEALTH_LIMIT");
+    }
+    if (
+      parseMoney(simulation.accountExposureUsd ?? "0") >
+      parseMoney(policy.maxAccountExposureUsd)
+    ) {
+      reasons.add("ACCOUNT_HEALTH_LIMIT");
+    }
+    if (
       !simulation.oracleObservedAt ||
       isStaleObservation(simulation.oracleObservedAt, {
         ...policy,
@@ -535,6 +619,29 @@ export function checkTrajectoryInvariants(params: {
       isLockLeaseActive(row),
   );
   if (activeSameScope) reasons.add("OVER_ALLOCATION_RISK");
+
+  const activeSameAccountScope = history.some(
+    (row) =>
+      current.accountLockScope !== undefined &&
+      row.accountLockScope === current.accountLockScope &&
+      row.intentId !== current.intentId &&
+      isActiveOrFinalDuplicate(row.status) &&
+      isLockLeaseActive(row),
+  );
+  if (activeSameAccountScope) {
+    reasons.add("ACCOUNT_LOCK_REQUIRED");
+    reasons.add("OVER_ALLOCATION_RISK");
+  }
+
+  const unresolvedSignatureTransition = history.some(
+    (row) =>
+      row.intentId !== current.intentId &&
+      sameSigningBoundary(row, current) &&
+      isUnresolvedSignatureTransition(row.status),
+  );
+  if (unresolvedSignatureTransition) {
+    reasons.add("SIGNATURE_RECONCILIATION_REQUIRED");
+  }
 
   const attemptsForGoal = history.filter(
     (row) =>
@@ -652,6 +759,7 @@ function isActiveOrFinalDuplicate(status: LedgerStatus): boolean {
     "LOCKED",
     "SIMULATED",
     "APPROVED_FOR_SIGNING",
+    "SIGNING",
     "SIGNED",
     "REQUEST_PENDING",
     "REQUEST_WATCH_REQUIRED",
@@ -664,8 +772,35 @@ function isActiveOrFinalDuplicate(status: LedgerStatus): boolean {
   ].includes(status);
 }
 
+function isUnresolvedSignatureTransition(status: LedgerStatus): boolean {
+  return [
+    "APPROVED_FOR_SIGNING",
+    "SIGNING",
+    "SIGNED",
+    "REQUEST_PENDING",
+    "REQUEST_WATCH_REQUIRED",
+    "AWAITING_HUMAN_APPROVAL",
+    "SUBMITTED",
+    "BROADCASTING",
+    "LANDED",
+  ].includes(status);
+}
+
+function sameSigningBoundary(
+  left: ActionLedgerRow,
+  right: ActionLedgerRow,
+): boolean {
+  return Boolean(
+    (left.lockScope && left.lockScope === right.lockScope) ||
+      (left.accountLockScope &&
+        left.accountLockScope === right.accountLockScope) ||
+      left.userGoalId === right.userGoalId,
+  );
+}
+
 function isMeaningfulPriorAction(status: LedgerStatus): boolean {
   return [
+    "SIGNING",
     "SIGNED",
     "REQUEST_PENDING",
     "SUBMITTED",
