@@ -39,6 +39,9 @@ Safeloop owns:
 - in-flight gas reservation and reverted gas accounting
 - partial fill reconciliation
 - signer-bound intent checks to resist storage rollback replay
+- monotonic oracle-age checks and clock-drift limits
+- priority-aware lock handling for emergency exits
+- explicit collateral pool identity
 
 ## Runtime Flow
 
@@ -130,6 +133,7 @@ Required properties:
 - lock ownership checks immediately before signing
 - lock lease renewal for human approval windows
 - signer-bound idempotency or equivalent intent binding
+- priority-aware lock acquisition for emergency actions
 - transactionally written before signing
 - retained across process restarts
 
@@ -247,6 +251,10 @@ unknown and therefore unsafe.
 During high volatility, the allowed oracle age is reduced from
 `maxOracleAgeMs` to `highVolatilityOracleAgeMs`.
 
+Freshness checks should prefer monotonic age captured by the simulator over
+local wall-clock deltas. If the simulator reports local clock skew above policy,
+Safeloop fails closed instead of relying on a drifting host clock.
+
 ### Gas Runway
 
 Reject new opens when native gas balance, estimated max gas cost, or recent gas
@@ -256,6 +264,18 @@ Close, cancel, and withdraw actions are allowed to use the reserved gas runway.
 In-flight signatures reserve gas before they are confirmed. Reverted
 transactions must also report gas burn before the action is treated as fully
 reconciled.
+
+### Emergency Priority
+
+Emergency close, cancel, and withdraw actions may preempt lower-priority global
+collateral locks. Normal opens cannot use this path.
+
+### Collateral Pool Identity
+
+Shared-collateral actions must provide an explicit `collateralPoolId`.
+Falling back to an implicit default pool is treated as pool leakage risk because
+it can merge unrelated risk domains or split one shared pool into several
+uncoordinated locks.
 
 ### NAV Guard
 

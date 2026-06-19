@@ -213,6 +213,7 @@ test("verifies lock ownership immediately before signing", async () => {
       globalCollateralLocks: true,
       lockLeaseRenewal: true,
       inFlightGasAccounting: true,
+      priorityLocks: true,
     },
     tryLock: async () => true,
     verifyLock: async () => false,
@@ -264,6 +265,7 @@ test("requires signer-bound intent protection against rollback replay", async ()
       globalCollateralLocks: true,
       lockLeaseRenewal: true,
       inFlightGasAccounting: true,
+      priorityLocks: true,
     },
     tryLock: async () => true,
     verifyLock: async () => true,
@@ -568,6 +570,83 @@ test("locks shared collateral across different venues", () => {
   assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
 });
 
+test("lets emergency close preempt lower-priority global collateral lock", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "backpack",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
+  assert.ok(!reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("requires explicit collateral pool for shared collateral locks", () => {
+  const current = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    dex: "dex-a",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("COLLATERAL_POOL_REQUIRED"));
+  assert.ok(reasons.includes("POOL_LEAKAGE_RISK"));
+});
+
 test("flags stale global collateral contention as cross-venue deadlock", () => {
   const current = row({
     actionType: "perps_open",
@@ -662,6 +741,64 @@ test("shrinks oracle freshness window during high volatility", () => {
   });
 
   assert.ok(reasons.includes("ORACLE_PRICE_STALE"));
+});
+
+test("uses monotonic oracle age when wall clock is stale", () => {
+  const current = row({
+    actionType: "perps_open",
+    collateralPoolId: "main-usdc",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date(Date.now() - 60_000).toISOString(),
+      oracleMonotonicAgeMs: 100,
+      clockSkewMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("ORACLE_PRICE_STALE"));
+});
+
+test("rejects unsafe local clock drift around oracle checks", () => {
+  const current = row({
+    actionType: "perps_open",
+    collateralPoolId: "main-usdc",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+      clockSkewMs: defaultPolicy.maxClockSkewMs + 1,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("CLOCK_DRIFT_LIMIT"));
 });
 
 test("blocks new opens when gas runway is too low", () => {

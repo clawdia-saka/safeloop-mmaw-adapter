@@ -58,6 +58,9 @@ It signs only when all checks pass:
 12. Native gas runway is preserved for emergency exits.
 13. In-flight signatures and reverted gas are counted before new opens.
 14. Partial fills stay pending until fully reconciled.
+15. Oracle age uses monotonic timing and rejects unsafe clock drift.
+16. Emergency exits can preempt lower-priority collateral locks.
+17. Shared collateral pools must be explicit.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -116,6 +119,9 @@ It can reject:
 - low native gas runway that would block emergency close/cancel actions
 - partial fills that would otherwise be mistaken for success
 - MFA or broadcast windows that shadow an expired lease
+- local clock drift that would brick or bypass oracle freshness checks
+- priority inversion where a low-priority task blocks an emergency exit
+- collateral pool leakage from ambiguous default pool labels
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -171,6 +177,9 @@ Included:
 - in-flight gas reservation and reverted-gas reconciliation
 - partial fill pending-state guards
 - signer-bound intent capability checks
+- monotonic oracle age and clock-drift limits
+- priority-aware global collateral locking
+- explicit collateral pool requirements
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -218,6 +227,8 @@ That means:
 - unsafe gas runway: do not sign new opens
 - partial fill unresolved: do not mark success
 - reverted gas missing: do not mark fully reconciled
+- unsafe local clock drift: do not sign
+- missing shared collateral pool: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 

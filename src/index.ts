@@ -73,12 +73,17 @@ export type AbortReason =
   | "GLOBAL_COLLATERAL_LOCK_REQUIRED"
   | "GLOBAL_COLLATERAL_LOCK_CONTENTION"
   | "CROSS_VENUE_RECONCILIATION_DEADLOCK"
+  | "PRIORITY_LOCK_REQUIRED"
+  | "COLLATERAL_POOL_REQUIRED"
+  | "POOL_LEAKAGE_RISK"
   | "SIGNATURE_RECONCILIATION_REQUIRED"
   | "SIGNATURE_EXPIRY_REQUIRED"
   | "SIGNATURE_EXPIRED"
   | "SIGNER_INTENT_BINDING_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
+  | "CLOCK_DRIFT_LIMIT"
+  | "ORACLE_MONOTONIC_AGE_REQUIRED"
   | "ORACLE_PRICE_STALE"
   | "NON_EVM_SIMULATION_REQUIRED"
   | "MARGIN_RATIO_LIMIT"
@@ -118,6 +123,7 @@ export type AgentIntent = {
   network?: "mainnet" | "testnet";
   accountId?: string;
   collateralPoolId?: string;
+  priority?: "emergency" | "high" | "normal" | "low";
   dex?: string;
   symbol?: string;
   side?: "long" | "short";
@@ -171,7 +177,9 @@ export type SimulationResult = {
   requiresHumanApproval?: boolean;
   reconciledAt?: string;
   oracleObservedAt?: string;
+  oracleMonotonicAgeMs?: number;
   oracleSource?: string;
+  clockSkewMs?: number;
   volatilityBps?: number;
   signatureExpiresAt?: string;
   filledSize?: string;
@@ -216,6 +224,7 @@ export type Ledger = {
     globalCollateralLocks?: boolean;
     lockLeaseRenewal?: boolean;
     inFlightGasAccounting?: boolean;
+    priorityLocks?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   verifyLock?(row: ActionLedgerRow): Promise<boolean>;
@@ -262,6 +271,8 @@ export type SafeloopPolicy = {
   maxOracleAgeMs: number;
   highVolatilityOracleAgeMs: number;
   oracleVolatilityThresholdBps: number;
+  requireMonotonicOracleAge: boolean;
+  maxClockSkewMs: number;
   requireExpiringSignatures: boolean;
   requireSignerIntentBinding: boolean;
   maxSignatureTtlMs: number;
@@ -271,6 +282,7 @@ export type SafeloopPolicy = {
   minLiquidationBufferBps: number;
   requireAccountWideLock: boolean;
   requireGlobalCollateralLock: boolean;
+  requireExplicitCollateralPool: boolean;
   minAccountMarginRatioBps: number;
   minAccountLiquidationBufferBps: number;
   maxAccountExposureUsd: string;
@@ -294,6 +306,8 @@ export const defaultPolicy: SafeloopPolicy = {
   maxOracleAgeMs: 5_000,
   highVolatilityOracleAgeMs: 500,
   oracleVolatilityThresholdBps: 250,
+  requireMonotonicOracleAge: true,
+  maxClockSkewMs: 250,
   requireExpiringSignatures: true,
   requireSignerIntentBinding: true,
   maxSignatureTtlMs: 15_000,
@@ -303,6 +317,7 @@ export const defaultPolicy: SafeloopPolicy = {
   minLiquidationBufferBps: 500,
   requireAccountWideLock: true,
   requireGlobalCollateralLock: true,
+  requireExplicitCollateralPool: true,
   minAccountMarginRatioBps: 12_500,
   minAccountLiquidationBufferBps: 500,
   maxAccountExposureUsd: "10000",
@@ -355,6 +370,7 @@ export function canonicalizeIntent(
     requiresDex: intent.requiresDex,
     accountId: intent.accountId?.toLowerCase(),
     collateralPoolId: intent.collateralPoolId?.toLowerCase(),
+    priority: intent.priority ?? inferPriority(intent),
     ...canonicalizePerpsFields(intent),
     roundedAmountBucket: roundAmountBucket(intent.amountIn ?? intent.size),
     timeBucket,
@@ -377,6 +393,7 @@ export function makeIdempotencyKey(intent: CanonicalIntent): string {
       dex: intent.dex,
       accountId: intent.accountId,
       collateralPoolId: intent.collateralPoolId,
+      priority: intent.priority,
       network: intent.network,
       orderId: intent.orderId,
       orderType: intent.orderType,
@@ -429,9 +446,10 @@ export function makeGlobalCollateralLockScope(
   intent: CanonicalIntent,
 ): string | undefined {
   if (!usesSharedCollateral(intent)) return undefined;
+  if (!intent.collateralPoolId) return undefined;
   return [
     intent.wallet,
-    intent.collateralPoolId ?? intent.accountId ?? "default",
+    intent.collateralPoolId,
     "global-collateral",
   ]
     .join(":")
@@ -477,6 +495,9 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     if (!params.ledger.capabilities?.inFlightGasAccounting) {
       ledgerReasons.push("IN_FLIGHT_GAS_RESERVED");
     }
+    if (!params.ledger.capabilities?.priorityLocks) {
+      ledgerReasons.push("PRIORITY_LOCK_REQUIRED");
+    }
     if (
       policy.requireAccountWideLock &&
       canonicalIntent.actionType.startsWith("perps_") &&
@@ -490,6 +511,13 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
       !params.ledger.capabilities?.globalCollateralLocks
     ) {
       ledgerReasons.push("GLOBAL_COLLATERAL_LOCK_REQUIRED");
+    }
+    if (
+      policy.requireExplicitCollateralPool &&
+      usesSharedCollateral(canonicalIntent) &&
+      !canonicalIntent.collateralPoolId
+    ) {
+      ledgerReasons.push("COLLATERAL_POOL_REQUIRED");
     }
     if (
       policy.requireSignerIntentBinding &&
@@ -637,6 +665,14 @@ export function checkTrajectoryInvariants(params: {
   if (current.lockedUntil && isExpired(current.lockedUntil)) {
     reasons.add("LOCK_LEASE_EXPIRED");
   }
+  if (
+    policy.requireExplicitCollateralPool &&
+    usesSharedCollateral(current) &&
+    !current.collateralPoolId
+  ) {
+    reasons.add("COLLATERAL_POOL_REQUIRED");
+    reasons.add("POOL_LEAKAGE_RISK");
+  }
   if (policy.requireExpiringSignatures) {
     if (!simulation.signatureExpiresAt && simulation.validUntilBlock === undefined) {
       reasons.add("SIGNATURE_EXPIRY_REQUIRED");
@@ -696,6 +732,18 @@ export function checkTrajectoryInvariants(params: {
     ) {
       reasons.add("ORACLE_PRICE_STALE");
     }
+    if (
+      policy.requireMonotonicOracleAge &&
+      simulation.oracleMonotonicAgeMs === undefined
+    ) {
+      reasons.add("ORACLE_MONOTONIC_AGE_REQUIRED");
+    }
+    if (
+      simulation.clockSkewMs !== undefined &&
+      Math.abs(simulation.clockSkewMs) > policy.maxClockSkewMs
+    ) {
+      reasons.add("CLOCK_DRIFT_LIMIT");
+    }
     for (const reason of simulation.venueReasonCodes ?? []) {
       reasons.add(reason);
     }
@@ -724,6 +772,8 @@ export function checkTrajectoryInvariants(params: {
 
   const activeSameScope = history.some(
     (row) =>
+      current.lockScope !== undefined &&
+      row.lockScope !== undefined &&
       row.lockScope === current.lockScope &&
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
@@ -750,7 +800,8 @@ export function checkTrajectoryInvariants(params: {
       row.globalCollateralLockScope === current.globalCollateralLockScope &&
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
-      isBlockingLock(row, policy),
+      isBlockingLock(row, policy) &&
+      !canEmergencyPreempt(current, row),
   );
   if (activeSameGlobalCollateralScope) {
     reasons.add("GLOBAL_COLLATERAL_LOCK_CONTENTION");
@@ -904,9 +955,12 @@ function usesAmbiguousTokenSymbol(
 function usesSharedCollateral(intent: CanonicalIntent): boolean {
   return (
     intent.actionType.startsWith("perps_") ||
-    intent.actionType === "bridge" ||
-    intent.actionType === "swap"
+    intent.actionType === "bridge"
   );
+}
+
+function inferPriority(intent: AgentIntent): "emergency" | "normal" {
+  return isEmergencyGasAction(intent) ? "emergency" : "normal";
 }
 
 function hasUnfilledExpectedSize(simulation: SimulationResult): boolean {
@@ -920,12 +974,23 @@ function hasUnfilledExpectedSize(simulation: SimulationResult): boolean {
   return parseMoney(simulation.filledSize) < parseMoney(simulation.expectedFillSize);
 }
 
-function isEmergencyGasAction(intent: CanonicalIntent): boolean {
+function isEmergencyGasAction(intent: {
+  actionType: ActionType;
+  priority?: "emergency" | "high" | "normal" | "low";
+}): boolean {
   return (
+    intent.priority === "emergency" ||
     intent.actionType === "perps_close" ||
     intent.actionType === "perps_cancel" ||
     intent.actionType === "perps_withdraw"
   );
+}
+
+function canEmergencyPreempt(
+  current: ActionLedgerRow,
+  prior: ActionLedgerRow,
+): boolean {
+  return isEmergencyGasAction(current) && !isEmergencyGasAction(prior);
 }
 
 function requiresHip3Dex(
@@ -957,13 +1022,17 @@ function isOraclePriceStale(
   simulation: SimulationResult,
   policy: SafeloopPolicy,
 ): boolean {
-  const observedMs = Date.parse(observedAt);
-  if (!Number.isFinite(observedMs)) return true;
   const maxAgeMs =
     simulation.volatilityBps !== undefined &&
     simulation.volatilityBps >= policy.oracleVolatilityThresholdBps
       ? policy.highVolatilityOracleAgeMs
       : policy.maxOracleAgeMs;
+  if (simulation.oracleMonotonicAgeMs !== undefined) {
+    return simulation.oracleMonotonicAgeMs > maxAgeMs;
+  }
+
+  const observedMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedMs)) return true;
   return Date.now() - observedMs > maxAgeMs;
 }
 

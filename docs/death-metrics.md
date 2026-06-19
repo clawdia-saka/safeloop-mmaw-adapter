@@ -544,3 +544,81 @@ Implementation hook:
 - `WalletRequestObservation.gasBurnedUsd`
 - `SimulationResult.revertedGasUsd`
 - `REVERT_GAS_BURN_UNACCOUNTED`
+
+## DM-23: Time-Drift Oracle Brick
+
+Severity: High
+
+Scenario:
+
+```text
+host clock drifts by milliseconds or seconds
+oracle freshness compares against local wall time
+fresh oracle data looks stale forever, or stale data looks fresh
+trading either bricks or signs on unsafe pricing
+```
+
+Required guard:
+
+- Oracle freshness should use monotonic age from the simulator when available.
+- Local clock skew above policy fails closed.
+- Wall-clock timestamps are fallback metadata, not the sole source of truth.
+
+Implementation hook:
+
+- `SimulationResult.oracleMonotonicAgeMs`
+- `SimulationResult.clockSkewMs`
+- `SafeloopPolicy.requireMonotonicOracleAge`
+- `CLOCK_DRIFT_LIMIT`
+- `ORACLE_MONOTONIC_AGE_REQUIRED`
+
+## DM-24: Priority Inversion on Global Lock
+
+Severity: Critical
+
+Scenario:
+
+```text
+low-priority open holds the global collateral lock
+market moves against an existing position
+emergency close waits behind the lower-priority task
+account is liquidated before the close can sign
+```
+
+Required guard:
+
+- Emergency exits must be priority-aware.
+- Lower-priority global collateral locks cannot block emergency close, cancel,
+  or withdraw paths.
+- Production ledgers must support priority-aware lock behavior.
+
+Implementation hook:
+
+- `AgentIntent.priority`
+- `Ledger.capabilities.priorityLocks`
+- `PRIORITY_LOCK_REQUIRED`
+
+## DM-25: Pool Leakage
+
+Severity: High
+
+Scenario:
+
+```text
+shared collateral action omits the collateral pool id
+system falls back to a default pool label
+unrelated pools are merged, or one real pool is split across labels
+risk limits and global locks become unreliable
+```
+
+Required guard:
+
+- Shared-collateral actions must carry an explicit `collateralPoolId`.
+- No implicit default collateral pool should be used for production locking.
+
+Implementation hook:
+
+- `AgentIntent.collateralPoolId`
+- `makeGlobalCollateralLockScope(...)`
+- `COLLATERAL_POOL_REQUIRED`
+- `POOL_LEAKAGE_RISK`

@@ -103,6 +103,9 @@ Recommended invariants:
 - reserve gas for MFA/broadcasting requests before confirmation
 - keep partial fills pending until size reconciliation completes
 - require signer-bound intent protection against storage rollback replay
+- require monotonic oracle age and clock-skew checks
+- allow emergency close/cancel flows to preempt lower-priority collateral locks
+- require explicit collateral pool identity for shared collateral paths
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -120,5 +123,8 @@ Recommended invariants:
 - Track native gas balance and recent gas burn before allowing new open actions.
 - Include in-flight gas reservations and reverted gas burn in runway accounting.
 - Renew or explicitly reconcile MFA-wait locks before their lease expires.
+- Do not rely on local wall-clock time alone for oracle freshness.
+- Tag emergency close/cancel intents with emergency priority.
+- Avoid implicit default collateral pools in production policies.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.
