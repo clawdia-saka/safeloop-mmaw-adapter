@@ -100,6 +100,9 @@ Recommended invariants:
 - reject cross-venue parallel intents that share the same collateral pool
 - require short-lived signed payloads so delayed mempool or sequencer replay cannot execute later
 - preserve native gas runway for emergency close/cancel flows
+- reserve gas for MFA/broadcasting requests before confirmation
+- keep partial fills pending until size reconciliation completes
+- require signer-bound intent protection against storage rollback replay
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -115,5 +118,7 @@ Recommended invariants:
 - Require volatility metadata so oracle freshness can tighten during fast markets.
 - Require signature expiry metadata such as a short timestamp or venue-native time-in-force.
 - Track native gas balance and recent gas burn before allowing new open actions.
+- Include in-flight gas reservations and reverted gas burn in runway accounting.
+- Renew or explicitly reconcile MFA-wait locks before their lease expires.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.

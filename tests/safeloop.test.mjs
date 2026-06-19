@@ -7,6 +7,7 @@ import {
   defaultPolicy,
   failClosedSign,
   makeAccountLockScope,
+  makeGlobalCollateralLockScope,
   makeLockScope,
   qualifyHip3Symbol,
   reconcileVenueState,
@@ -95,6 +96,12 @@ test("does not treat broadcasting wallet requests as terminal success", () => {
   assert.equal(decision.status, "BROADCASTING");
   assert.equal(decision.terminal, false);
   assert.ok(decision.reasonCodes.includes("BROADCASTING_TIMEOUT"));
+});
+
+test("requires reverted transaction gas burn reconciliation", () => {
+  const decision = reconcileWalletRequest({ state: "REVERTED" });
+  assert.equal(decision.status, "REVERTED");
+  assert.ok(decision.reasonCodes.includes("REVERT_GAS_BURN_UNACCOUNTED"));
 });
 
 test("requires venue reconciliation for perps open", () => {
@@ -204,6 +211,8 @@ test("verifies lock ownership immediately before signing", async () => {
       ownedLocks: true,
       accountScopedLocks: true,
       globalCollateralLocks: true,
+      lockLeaseRenewal: true,
+      inFlightGasAccounting: true,
     },
     tryLock: async () => true,
     verifyLock: async () => false,
@@ -225,6 +234,7 @@ test("verifies lock ownership immediately before signing", async () => {
         },
         ledger,
         mmaw: {
+          capabilities: { intentBoundSignatures: true },
           buildUnsignedOperation: async () => ({}),
           sign: async () => {
             signCalled = true;
@@ -241,6 +251,51 @@ test("verifies lock ownership immediately before signing", async () => {
   );
 
   assert.equal(signCalled, false);
+});
+
+test("requires signer-bound intent protection against rollback replay", async () => {
+  const ledger = {
+    capabilities: {
+      durable: true,
+      atomicLocks: true,
+      lockLeases: true,
+      ownedLocks: true,
+      accountScopedLocks: true,
+      globalCollateralLocks: true,
+      lockLeaseRenewal: true,
+      inFlightGasAccounting: true,
+    },
+    tryLock: async () => true,
+    verifyLock: async () => true,
+    markStatus: async () => {},
+    recentForWallet: async () => [],
+  };
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: {
+          userGoalId: "rollback-replay",
+          wallet: "0x0000000000000000000000000000000000000001",
+          chainId: 1,
+          actionType: "swap",
+          assetIn: "eth",
+          assetOut: "usdc",
+          amountIn: "1",
+        },
+        ledger,
+        mmaw: {
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => ({}),
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("SIGNER_INTENT_BINDING_REQUIRED"),
+  );
 });
 
 test("detects active lock-scope overlap before reconciliation completes", () => {
@@ -338,6 +393,44 @@ test("requires signature reconciliation before retrying a signing transition", (
   });
 
   assert.ok(reasons.includes("SIGNATURE_RECONCILIATION_REQUIRED"));
+});
+
+test("keeps expired MFA wait locks shadowed until lease renewal", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+  current.lockScope = makeLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = {
+    ...current,
+    intentId: "prior",
+    idempotencyKey: "prior-key",
+    status: "AWAITING_HUMAN_APPROVAL",
+    lockedUntil: new Date(Date.now() - 1_000).toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("LOCK_LEASE_EXTENSION_REQUIRED"));
+  assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
 });
 
 test("requires cryptographic signature expiry before signing", () => {
@@ -475,6 +568,46 @@ test("locks shared collateral across different venues", () => {
   assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
 });
 
+test("flags stale global collateral contention as cross-venue deadlock", () => {
+  const current = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = {
+    ...current,
+    intentId: "prior",
+    idempotencyKey: "prior-key",
+    status: "AWAITING_HUMAN_APPROVAL",
+    lockedUntil: new Date(Date.now() + 60_000).toISOString(),
+    updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+  };
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("CROSS_VENUE_RECONCILIATION_DEADLOCK"));
+  assert.ok(reasons.includes("GLOBAL_COLLATERAL_LOCK_CONTENTION"));
+});
+
 test("rejects unsafe account-wide Hyperliquid health", () => {
   const current = row({
     actionType: "perps_open",
@@ -560,6 +693,36 @@ test("blocks new opens when gas runway is too low", () => {
   assert.ok(reasons.includes("GAS_RUNWAY_LOW"));
 });
 
+test("reserves gas runway for in-flight signatures", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      nativeBalanceUsd: "15",
+      estimatedMaxGasUsd: "1",
+      inFlightGasUsd: "10",
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("GAS_RUNWAY_LOW"));
+  assert.ok(reasons.includes("IN_FLIGHT_GAS_RESERVED"));
+});
+
 test("allows emergency close to use reserved gas runway", () => {
   const current = row({
     actionType: "perps_close",
@@ -596,6 +759,46 @@ test("requires position size delta reconciliation for partial perps close", () =
 
   assert.equal(decision.status, "REQUEST_WATCH_REQUIRED");
   assert.ok(decision.reasonCodes.includes("POSITION_DELTA_MISMATCH"));
+});
+
+test("does not mark partial fills as terminal success", () => {
+  const decision = reconcileVenueState("perps_open", {
+    fillStatus: "partial",
+    expectedFillSize: "10",
+    filledSize: "4",
+  });
+
+  assert.equal(decision.status, "REQUEST_WATCH_REQUIRED");
+  assert.ok(decision.reasonCodes.includes("PARTIAL_FILL_PENDING"));
+});
+
+test("flags partial fill simulation divergence", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "10",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      fillStatus: "partial",
+      expectedFillSize: "10",
+      filledSize: "4",
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("PARTIAL_FILL_PENDING"));
 });
 
 test("accepts exact position size delta reconciliation", () => {

@@ -56,6 +56,8 @@ It signs only when all checks pass:
 10. Signed payloads expire quickly enough to prevent ghost replay.
 11. Shared collateral is locked across venues.
 12. Native gas runway is preserved for emergency exits.
+13. In-flight signatures and reverted gas are counted before new opens.
+14. Partial fills stay pending until fully reconciled.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -112,6 +114,8 @@ It can reject:
 - stale signing transitions that require wallet request or tx history reconciliation before retry
 - long-lived signed transactions that could later replay from a mempool or sequencer queue
 - low native gas runway that would block emergency close/cancel actions
+- partial fills that would otherwise be mistaken for success
+- MFA or broadcast windows that shadow an expired lease
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -164,6 +168,9 @@ Included:
 - short signature expiry requirements for ghost transaction control
 - global collateral locks across venues that share the same funding pool
 - gas runway and burn-rate gates to preserve emergency close capacity
+- in-flight gas reservation and reverted-gas reconciliation
+- partial fill pending-state guards
+- signer-bound intent capability checks
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -209,6 +216,8 @@ That means:
 - unsafe account-wide perps health: do not sign
 - stale oracle price: do not sign
 - unsafe gas runway: do not sign new opens
+- partial fill unresolved: do not mark success
+- reverted gas missing: do not mark fully reconciled
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 

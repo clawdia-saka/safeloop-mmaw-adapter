@@ -71,9 +71,12 @@ export type AbortReason =
   | "LOCK_OWNERSHIP_LOST"
   | "ACCOUNT_LOCK_REQUIRED"
   | "GLOBAL_COLLATERAL_LOCK_REQUIRED"
+  | "GLOBAL_COLLATERAL_LOCK_CONTENTION"
+  | "CROSS_VENUE_RECONCILIATION_DEADLOCK"
   | "SIGNATURE_RECONCILIATION_REQUIRED"
   | "SIGNATURE_EXPIRY_REQUIRED"
   | "SIGNATURE_EXPIRED"
+  | "SIGNER_INTENT_BINDING_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
   | "ORACLE_PRICE_STALE"
@@ -83,7 +86,11 @@ export type AbortReason =
   | "ACCOUNT_HEALTH_LIMIT"
   | "GAS_RUNWAY_LOW"
   | "GAS_BURN_RATE_LIMIT"
+  | "IN_FLIGHT_GAS_RESERVED"
+  | "REVERT_GAS_BURN_UNACCOUNTED"
+  | "PARTIAL_FILL_PENDING"
   | "OVER_ALLOCATION_RISK"
+  | "LOCK_LEASE_EXTENSION_REQUIRED"
   | "UNKNOWN_STATE";
 
 export type AgentIntent = {
@@ -167,6 +174,9 @@ export type SimulationResult = {
   oracleSource?: string;
   volatilityBps?: number;
   signatureExpiresAt?: string;
+  filledSize?: string;
+  expectedFillSize?: string;
+  fillStatus?: "none" | "partial" | "filled";
   validUntilBlock?: number;
   venueSimulation?: "evm" | "hyperliquid-margin-model" | "hyperliquid-api" | "unknown";
   marginRatioBps?: number;
@@ -176,6 +186,8 @@ export type SimulationResult = {
   accountExposureUsd?: string;
   nativeBalanceUsd?: string;
   estimatedMaxGasUsd?: string;
+  inFlightGasUsd?: string;
+  revertedGasUsd?: string;
   gasSpentLookbackUsd?: string;
   gasRunwayTransactions?: number;
   venueReasonCodes?: AbortReason[];
@@ -202,6 +214,8 @@ export type Ledger = {
     ownedLocks?: boolean;
     accountScopedLocks?: boolean;
     globalCollateralLocks?: boolean;
+    lockLeaseRenewal?: boolean;
+    inFlightGasAccounting?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   verifyLock?(row: ActionLedgerRow): Promise<boolean>;
@@ -218,6 +232,9 @@ export type Ledger = {
 };
 
 export type MmawSigner<TUnsignedOperation, TSignedOperation> = {
+  capabilities?: {
+    intentBoundSignatures?: boolean;
+  };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
 };
@@ -246,7 +263,10 @@ export type SafeloopPolicy = {
   highVolatilityOracleAgeMs: number;
   oracleVolatilityThresholdBps: number;
   requireExpiringSignatures: boolean;
+  requireSignerIntentBinding: boolean;
   maxSignatureTtlMs: number;
+  maxHumanApprovalMs: number;
+  maxGlobalCollateralContentionMs: number;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
   requireAccountWideLock: boolean;
@@ -275,7 +295,10 @@ export const defaultPolicy: SafeloopPolicy = {
   highVolatilityOracleAgeMs: 500,
   oracleVolatilityThresholdBps: 250,
   requireExpiringSignatures: true,
+  requireSignerIntentBinding: true,
   maxSignatureTtlMs: 15_000,
+  maxHumanApprovalMs: 300_000,
+  maxGlobalCollateralContentionMs: 120_000,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
   requireAccountWideLock: true,
@@ -448,6 +471,12 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     if (!params.ledger.capabilities?.ownedLocks || !params.ledger.verifyLock) {
       ledgerReasons.push("LOCK_OWNERSHIP_REQUIRED");
     }
+    if (!params.ledger.capabilities?.lockLeaseRenewal) {
+      ledgerReasons.push("LOCK_LEASE_EXTENSION_REQUIRED");
+    }
+    if (!params.ledger.capabilities?.inFlightGasAccounting) {
+      ledgerReasons.push("IN_FLIGHT_GAS_RESERVED");
+    }
     if (
       policy.requireAccountWideLock &&
       canonicalIntent.actionType.startsWith("perps_") &&
@@ -461,6 +490,12 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
       !params.ledger.capabilities?.globalCollateralLocks
     ) {
       ledgerReasons.push("GLOBAL_COLLATERAL_LOCK_REQUIRED");
+    }
+    if (
+      policy.requireSignerIntentBinding &&
+      !params.mmaw.capabilities?.intentBoundSignatures
+    ) {
+      ledgerReasons.push("SIGNER_INTENT_BINDING_REQUIRED");
     }
     if (ledgerReasons.length > 0) throw new SafeloopAbort(ledgerReasons);
   }
@@ -506,6 +541,7 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     ]);
     throw error;
   }
+  row.signatureExpiresAt = simulation.signatureExpiresAt;
 
   await params.ledger.markStatus(intentId, "SIMULATED");
 
@@ -573,9 +609,18 @@ export function checkTrajectoryInvariants(params: {
 
   if (simulation.status === "failed") reasons.add("SIMULATION_FAILED");
   if (simulation.status === "unavailable") reasons.add("SIMULATION_UNAVAILABLE");
+  if (simulation.status === "failed" && simulation.revertedGasUsd === undefined) {
+    reasons.add("REVERT_GAS_BURN_UNACCOUNTED");
+  }
   if (simulation.quoteExecuted === false) reasons.add("QUOTE_ONLY_NOT_EXECUTED");
   if (simulation.positionReconciled === false) {
     reasons.add("POSITION_NOT_RECONCILED");
+  }
+  if (
+    simulation.fillStatus === "partial" ||
+    hasUnfilledExpectedSize(simulation)
+  ) {
+    reasons.add("PARTIAL_FILL_PENDING");
   }
   if (simulation.broadcastStatus === "expired") {
     reasons.add("BROADCAST_TRACKING_EXPIRED");
@@ -682,7 +727,7 @@ export function checkTrajectoryInvariants(params: {
       row.lockScope === current.lockScope &&
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
-      isLockLeaseActive(row),
+      isBlockingLock(row, policy),
   );
   if (activeSameScope) reasons.add("OVER_ALLOCATION_RISK");
 
@@ -692,7 +737,7 @@ export function checkTrajectoryInvariants(params: {
       row.accountLockScope === current.accountLockScope &&
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
-      isLockLeaseActive(row),
+      isBlockingLock(row, policy),
   );
   if (activeSameAccountScope) {
     reasons.add("ACCOUNT_LOCK_REQUIRED");
@@ -705,10 +750,35 @@ export function checkTrajectoryInvariants(params: {
       row.globalCollateralLockScope === current.globalCollateralLockScope &&
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
-      isLockLeaseActive(row),
+      isBlockingLock(row, policy),
   );
   if (activeSameGlobalCollateralScope) {
+    reasons.add("GLOBAL_COLLATERAL_LOCK_CONTENTION");
     reasons.add("GLOBAL_COLLATERAL_LOCK_REQUIRED");
+    reasons.add("OVER_ALLOCATION_RISK");
+  }
+
+  const staleGlobalCollateralContention = history.some(
+    (row) =>
+      current.globalCollateralLockScope !== undefined &&
+      row.globalCollateralLockScope === current.globalCollateralLockScope &&
+      row.intentId !== current.intentId &&
+      isHumanOrBroadcastWait(row.status) &&
+      isStaleLedgerRow(row, policy.maxGlobalCollateralContentionMs),
+  );
+  if (staleGlobalCollateralContention) {
+    reasons.add("CROSS_VENUE_RECONCILIATION_DEADLOCK");
+  }
+
+  const expiredHumanWaitLease = history.some(
+    (row) =>
+      sharesAnyLockScope(row, current) &&
+      isHumanApprovalWait(row.status) &&
+      row.lockedUntil !== undefined &&
+      isExpired(row.lockedUntil),
+  );
+  if (expiredHumanWaitLease) {
+    reasons.add("LOCK_LEASE_EXTENSION_REQUIRED");
     reasons.add("OVER_ALLOCATION_RISK");
   }
 
@@ -782,13 +852,19 @@ export function checkTrajectoryInvariants(params: {
 
     const nativeBalanceUsd = parseMoney(simulation.nativeBalanceUsd ?? "0");
     const estimatedMaxGasUsd = parseMoney(simulation.estimatedMaxGasUsd ?? "0");
+    const inFlightGasUsd = parseMoney(simulation.inFlightGasUsd ?? "0");
+    const revertedGasUsd = parseMoney(simulation.revertedGasUsd ?? "0");
+    const reservedGasUsd =
+      estimatedMaxGasUsd * policy.minGasRunwayTransactions +
+      inFlightGasUsd +
+      revertedGasUsd;
     if (
       nativeBalanceUsd > 0 &&
       estimatedMaxGasUsd > 0 &&
-      nativeBalanceUsd <
-        estimatedMaxGasUsd * policy.minGasRunwayTransactions
+      nativeBalanceUsd < reservedGasUsd
     ) {
       reasons.add("GAS_RUNWAY_LOW");
+      if (inFlightGasUsd > 0) reasons.add("IN_FLIGHT_GAS_RESERVED");
     }
 
     if (
@@ -831,6 +907,17 @@ function usesSharedCollateral(intent: CanonicalIntent): boolean {
     intent.actionType === "bridge" ||
     intent.actionType === "swap"
   );
+}
+
+function hasUnfilledExpectedSize(simulation: SimulationResult): boolean {
+  if (
+    simulation.expectedFillSize === undefined ||
+    simulation.filledSize === undefined
+  ) {
+    return false;
+  }
+
+  return parseMoney(simulation.filledSize) < parseMoney(simulation.expectedFillSize);
 }
 
 function isEmergencyGasAction(intent: CanonicalIntent): boolean {
@@ -899,6 +986,47 @@ function isExpired(iso: string): boolean {
 function isLockLeaseActive(row: ActionLedgerRow): boolean {
   if (!row.lockedUntil) return true;
   return !isExpired(row.lockedUntil);
+}
+
+function isBlockingLock(row: ActionLedgerRow, policy: SafeloopPolicy): boolean {
+  if (isLockLeaseActive(row)) return true;
+  return (
+    isHumanOrBroadcastWait(row.status) &&
+    !isStaleLedgerRow(row, policy.maxHumanApprovalMs)
+  );
+}
+
+function isHumanOrBroadcastWait(status: LedgerStatus): boolean {
+  return [
+    "REQUEST_PENDING",
+    "REQUEST_WATCH_REQUIRED",
+    "AWAITING_HUMAN_APPROVAL",
+    "BROADCASTING",
+    "SUBMITTED",
+  ].includes(status);
+}
+
+function isHumanApprovalWait(status: LedgerStatus): boolean {
+  return ["REQUEST_PENDING", "AWAITING_HUMAN_APPROVAL"].includes(status);
+}
+
+function isStaleLedgerRow(row: ActionLedgerRow, maxAgeMs: number): boolean {
+  const updatedMs = Date.parse(row.updatedAt);
+  if (!Number.isFinite(updatedMs)) return true;
+  return Date.now() - updatedMs > maxAgeMs;
+}
+
+function sharesAnyLockScope(
+  left: ActionLedgerRow,
+  right: ActionLedgerRow,
+): boolean {
+  return Boolean(
+    (left.lockScope && left.lockScope === right.lockScope) ||
+      (left.accountLockScope &&
+        left.accountLockScope === right.accountLockScope) ||
+      (left.globalCollateralLockScope &&
+        left.globalCollateralLockScope === right.globalCollateralLockScope),
+  );
 }
 
 function isActiveOrFinalDuplicate(status: LedgerStatus): boolean {

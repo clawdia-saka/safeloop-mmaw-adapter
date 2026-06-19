@@ -15,6 +15,8 @@ create table if not exists safeloop_action_ledger (
   lock_owner_id text,
   locked_until timestamptz,
   signature_expires_at timestamptz,
+  in_flight_gas_usd numeric,
+  reverted_gas_usd numeric,
   canonical_intent jsonb not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -206,6 +208,42 @@ as $$
         and locked_until > now()
     )
   );
+$$;
+
+create or replace function safeloop_extend_action_lock(
+  p_intent_id text,
+  p_lock_owner_id text,
+  p_locked_until timestamptz
+)
+returns boolean
+language plpgsql
+as $$
+begin
+  update safeloop_action_locks
+  set locked_until = p_locked_until
+  where intent_id = p_intent_id
+    and lock_owner_id = p_lock_owner_id
+    and locked_until > now();
+
+  update safeloop_action_ledger
+  set locked_until = p_locked_until
+  where intent_id = p_intent_id
+    and lock_owner_id = p_lock_owner_id;
+
+  return found;
+end;
+$$;
+
+create or replace function safeloop_mark_signature_expiry(
+  p_intent_id text,
+  p_signature_expires_at timestamptz
+)
+returns void
+language sql
+as $$
+  update safeloop_action_ledger
+  set signature_expires_at = p_signature_expires_at
+  where intent_id = p_intent_id;
 $$;
 
 create or replace function safeloop_release_action_lock(p_intent_id text)

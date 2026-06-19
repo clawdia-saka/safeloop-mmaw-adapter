@@ -396,3 +396,151 @@ Implementation hook:
 - `SimulationResult.gasSpentLookbackUsd`
 - `GAS_RUNWAY_LOW`
 - `GAS_BURN_RATE_LIMIT`
+
+## DM-17: Cross-Venue Reconciliation Deadlock
+
+Severity: High
+
+Scenario:
+
+```text
+venue B enters MFA or broadcasting
+global collateral lock covers all venues using that pool
+other collateral moves block behind the stuck request
+workers either freeze forever or try to bypass the parent lock
+```
+
+Required guard:
+
+- Global collateral contention must be explicit.
+- Stale MFA/broadcast contention must surface as a deadlock reason.
+- Operators can reconcile or cancel the stuck request instead of silently
+  creating a competing intent.
+
+Implementation hook:
+
+- `GLOBAL_COLLATERAL_LOCK_CONTENTION`
+- `CROSS_VENUE_RECONCILIATION_DEADLOCK`
+- `SafeloopPolicy.maxGlobalCollateralContentionMs`
+
+## DM-18: Partial Fill Reconciliation Divergence
+
+Severity: Medium
+
+Scenario:
+
+```text
+order partially fills
+adapter marks success because an order or position exists
+unfilled exposure remains unhedged
+agent memory drifts from venue state
+```
+
+Required guard:
+
+- Partial fills stay pending until expected and filled size reconcile.
+- Venue observations must carry fill status or expected-vs-filled size.
+
+Implementation hook:
+
+- `SimulationResult.fillStatus`
+- `SimulationResult.expectedFillSize`
+- `SimulationResult.filledSize`
+- `PARTIAL_FILL_PENDING`
+
+## DM-19: Signer-Enforced Rollback Replay
+
+Severity: Critical
+
+Scenario:
+
+```text
+signature is created
+ledger commit rolls back or is lost
+worker restarts
+same intent signs again because storage forgot the first signature
+```
+
+Required guard:
+
+- The signer must bind signatures to the intent or equivalent idempotency
+  material.
+- A storage ledger alone is insufficient for production signing.
+
+Implementation hook:
+
+- `MmawSigner.capabilities.intentBoundSignatures`
+- `SIGNER_INTENT_BINDING_REQUIRED`
+
+## DM-20: Gas Runway Arbitrage via MFA/Broadcast Latency
+
+Severity: High
+
+Scenario:
+
+```text
+many signed requests sit in MFA or broadcasting
+confirmed gas still looks low
+pending queue later lands and burns gas
+emergency close fails because native balance is gone
+```
+
+Required guard:
+
+- Gas runway must subtract in-flight gas reservations before confirmation.
+- New opens fail closed when pending signatures would consume emergency gas.
+
+Implementation hook:
+
+- `SimulationResult.inFlightGasUsd`
+- `IN_FLIGHT_GAS_RESERVED`
+- `GAS_RUNWAY_LOW`
+
+## DM-21: Lock Lease Shadowing During MFA Wait
+
+Severity: High
+
+Scenario:
+
+```text
+worker enters MFA wait
+two-minute lock lease expires
+another worker reacquires the same scope
+human approval later completes the first request
+two conflicting intents now exist
+```
+
+Required guard:
+
+- Human approval windows need lease renewal support.
+- An expired MFA wait lock is still a shadow lock until reconciled or stale by
+  policy.
+
+Implementation hook:
+
+- `Ledger.capabilities.lockLeaseRenewal`
+- `LOCK_LEASE_EXTENSION_REQUIRED`
+
+## DM-22: Reconciliation Gap on Revert-with-Value
+
+Severity: Medium
+
+Scenario:
+
+```text
+transaction reverts
+agent only records failure
+gas burn is not added to runway accounting
+retry loop drains native token silently
+```
+
+Required guard:
+
+- Reverted transactions must carry gas burn data into reconciliation.
+- Missing gas burn on a reverted request remains unreconciled.
+
+Implementation hook:
+
+- `WalletRequestObservation.gasBurnedUsd`
+- `SimulationResult.revertedGasUsd`
+- `REVERT_GAS_BURN_UNACCOUNTED`

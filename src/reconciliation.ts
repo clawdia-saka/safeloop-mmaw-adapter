@@ -17,10 +17,14 @@ export type WalletRequestObservation = {
   state: WalletRequestState;
   txHash?: `0x${string}`;
   intent?: string;
+  gasBurnedUsd?: string;
 };
 
 export type VenueObservation = {
   positionFound?: boolean;
+  fillStatus?: "none" | "partial" | "filled";
+  expectedFillSize?: string;
+  filledSize?: string;
   expectedPositionSize?: string;
   observedPositionSize?: string;
   positionSizeTolerance?: string;
@@ -51,7 +55,12 @@ export function reconcileWalletRequest(
     case "CONFIRMED":
       return terminal("LANDED");
     case "REVERTED":
-      return terminal("REVERTED");
+      return terminal(
+        "REVERTED",
+        observation.gasBurnedUsd === undefined
+          ? ["REVERT_GAS_BURN_UNACCOUNTED"]
+          : [],
+      );
     case "FAILED":
       return terminal("ABORTED", ["UNKNOWN_STATE"]);
     case "TIMED_OUT":
@@ -66,6 +75,14 @@ export function reconcileVenueState(
   observation: VenueObservation,
 ): ReconciliationDecision {
   if (!actionType.startsWith("perps_")) return terminal("CONFIRMED");
+
+  if (observation.fillStatus === "partial") {
+    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+  }
+
+  if (hasUnfilledExpectedSize(observation)) {
+    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+  }
 
   if (requiresPositionDelta(actionType, observation)) {
     if (matchesExpectedPositionSize(observation)) {
@@ -91,6 +108,20 @@ export function reconcileVenueState(
   }
 
   return pending("REQUEST_WATCH_REQUIRED", ["POSITION_NOT_RECONCILED"]);
+}
+
+function hasUnfilledExpectedSize(observation: VenueObservation): boolean {
+  if (
+    observation.expectedFillSize === undefined ||
+    observation.filledSize === undefined
+  ) {
+    return false;
+  }
+
+  const expected = parseDecimal(observation.expectedFillSize);
+  const filled = parseDecimal(observation.filledSize);
+  if (expected === undefined || filled === undefined) return true;
+  return filled < expected;
 }
 
 function requiresPositionDelta(

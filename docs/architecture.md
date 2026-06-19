@@ -36,6 +36,9 @@ Safeloop owns:
 - dynamic oracle freshness checks for perps margin inputs
 - short signature expiry enforcement
 - native gas runway protection
+- in-flight gas reservation and reverted gas accounting
+- partial fill reconciliation
+- signer-bound intent checks to resist storage rollback replay
 
 ## Runtime Flow
 
@@ -125,6 +128,8 @@ Required properties:
 - atomic distributed lock acquisition for global collateral scopes
 - TTL-based lock leases so crashed workers cannot brick a market forever
 - lock ownership checks immediately before signing
+- lock lease renewal for human approval windows
+- signer-bound idempotency or equivalent intent binding
 - transactionally written before signing
 - retained across process restarts
 
@@ -192,6 +197,10 @@ Signed operations must also have a short cryptographic lifetime. If the
 operation has no expiry metadata, or the expiry exceeds policy, Safeloop treats
 the result as replayable and refuses to sign.
 
+The signer integration must support intent-bound signatures. Storage state alone
+is not enough because a storage rollback after signature creation can let the
+same intent sign again after restart.
+
 ### Position Reconciliation
 
 For perps actions, require a post-action position, order, or balance check before marking the action successful.
@@ -199,6 +208,10 @@ For perps actions, require a post-action position, order, or balance check befor
 For partial close and modify flows, a Boolean "position exists" check is not
 enough. Safeloop must compare expected and observed position size within a
 defined tolerance before marking venue reconciliation complete.
+
+Partial fills remain pending. A partially filled order is neither full success
+nor clean failure until the unmatched size is canceled, filled, or explicitly
+reconciled into a new intent.
 
 ### Fee To Trade Value
 
@@ -221,6 +234,10 @@ Reject parallel intents that share the same collateral pool even when they targe
 different venues. The global collateral lock is a parent lock above market,
 builder DEX, and venue-specific account locks.
 
+If a global collateral lock is stuck in MFA or broadcasting beyond policy, the
+next attempt fails with a cross-venue reconciliation deadlock reason instead of
+silently bypassing the lock.
+
 ### Oracle Freshness
 
 Reject perps simulations when mark price or index price input is missing a
@@ -235,6 +252,10 @@ During high volatility, the allowed oracle age is reduced from
 Reject new opens when native gas balance, estimated max gas cost, or recent gas
 burn rate leaves fewer than the configured number of emergency transactions.
 Close, cancel, and withdraw actions are allowed to use the reserved gas runway.
+
+In-flight signatures reserve gas before they are confirmed. Reverted
+transactions must also report gas burn before the action is treated as fully
+reconciled.
 
 ### NAV Guard
 
