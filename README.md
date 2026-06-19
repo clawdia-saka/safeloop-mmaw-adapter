@@ -65,6 +65,7 @@ It signs only when all checks pass:
 19. Signing locks get a short non-preemptable window to avoid emergency livelock.
 20. A preempted live transaction must have cancellation proof before another transaction signs.
 21. Cancellation proof can use fresh multi-RPC broadcast acceptance to avoid RPC indexing deadlock.
+22. Nonce domains, lock fencing, gas reservations, partial fills, and guard composition are checked for cross-guard failure.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -130,6 +131,14 @@ It can reject:
 - emergency preemption loops that keep aborting each other before broadcast
 - preempted transactions that may still be alive in a mempool or venue queue
 - cancellation proof waits that would put RPC indexing lag on the emergency path
+- stale or false-positive cancellation proofs
+- shared nonce collisions across workers
+- low-priority floods that starve emergency exits
+- split-brain lock release after worker restart
+- stale gas reservations from aborted preemption
+- overfit time calibration in a new volatility regime
+- partial-fill reconciliation loops
+- safety guards that cancel each other out
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -192,6 +201,9 @@ Included:
 - non-preemptable signing windows and preemption rate limits
 - preemption cancellation proof for live broadcast risk
 - multi-RPC cancellation acceptance as a bounded fallback for indexing lag
+- nonce-domain and lock-fencing guards for concurrent workers
+- gas reservation drift and partial reconciliation loop checks
+- guard-composition conflict detection for emergency flows
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -245,6 +257,11 @@ That means:
 - live preempted transaction without cancellation proof: do not sign
 - emergency preemption livelock risk: do not sign
 - stale or under-quorum cancellation acceptance: do not sign
+- nonce collision or missing nonce domain on emergency preemption: do not sign
+- split-brain lock fencing gap: do not sign
+- stale gas reservation drift: do not sign
+- partial reconciliation loop: do not keep retrying blindly
+- conflicting emergency guard composition: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 

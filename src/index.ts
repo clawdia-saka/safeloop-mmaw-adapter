@@ -104,7 +104,18 @@ export type AbortReason =
   | "PREEMPTION_CANCEL_REQUIRED"
   | "PREEMPTION_CANCEL_QUORUM_REQUIRED"
   | "CANCELLATION_PROOF_INDEXING_LAG"
+  | "CANCELLATION_PROOF_STALE"
+  | "CANCEL_PROOF_FALSE_POSITIVE_RISK"
+  | "NONCE_DOMAIN_REQUIRED"
+  | "NONCE_DOMAIN_COLLISION"
   | "PREEMPTED_TX_STILL_LIVE"
+  | "EMERGENCY_CLOSE_STARVATION"
+  | "LOCK_FENCING_REQUIRED"
+  | "LOCK_RELEASE_SPLIT_BRAIN"
+  | "GAS_RESERVATION_DRIFT"
+  | "TIME_CALIBRATION_OVERFIT"
+  | "PARTIAL_RECONCILIATION_LOOP"
+  | "GUARD_COMPOSITION_FAILURE"
   | "UNKNOWN_STATE";
 
 export type AgentIntent = {
@@ -124,6 +135,8 @@ export type AgentIntent = {
   quoteId?: string;
   pollingId?: string;
   txHash?: `0x${string}`;
+  nonceDomain?: string;
+  nonce?: number;
   tokenContract?: `0x${string}`;
   tokenSymbol?: string;
   isTestnetUsdc?: boolean;
@@ -166,6 +179,7 @@ export type ActionLedgerRow = CanonicalIntent & {
   accountLockScope?: string;
   globalCollateralLockScope?: string;
   lockOwnerId?: string;
+  lockEpoch?: number;
   lockedUntil?: string;
   signatureExpiresAt?: string;
   preemptionCount?: number;
@@ -177,9 +191,16 @@ export type ActionLedgerRow = CanonicalIntent & {
     | "broadcast_accepted"
     | "confirmed";
   preemptionCancelTxHash?: `0x${string}`;
+  preemptionCancelNonce?: number;
+  preemptionCancelReplacesTxHash?: `0x${string}`;
   preemptionCancelSubmittedAt?: string;
   preemptionCancelObservedAt?: string;
   preemptionCancelRpcQuorum?: number;
+  gasReservationStatus?: "none" | "reserved" | "released" | "consumed";
+  gasReservedUsd?: string;
+  gasReservationUpdatedAt?: string;
+  partialFillCount?: number;
+  lastPartialFillAt?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -204,6 +225,7 @@ export type SimulationResult = {
   timeCalibrationSource?: "durable" | "local" | "unknown";
   timeCalibrationSyncedAt?: string;
   timeCalibrationRoundTripMs?: number;
+  timeCalibrationMaxVolatilityBps?: number;
   volatilityBps?: number;
   signatureExpiresAt?: string;
   filledSize?: string;
@@ -250,6 +272,7 @@ export type Ledger = {
     inFlightGasAccounting?: boolean;
     priorityLocks?: boolean;
     preemptionCancellation?: boolean;
+    lockFencing?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   verifyLock?(row: ActionLedgerRow): Promise<boolean>;
@@ -314,6 +337,12 @@ export type SafeloopPolicy = {
   maxPreemptionCancelProofWaitMs: number;
   maxPreemptionCancelAcceptanceAgeMs: number;
   minPreemptionCancelRpcQuorum: number;
+  requireNonceBoundCancellation: boolean;
+  requireLockFencing: boolean;
+  maxLowPriorityQueueAheadOfEmergency: number;
+  maxStaleGasReservationUsd: string;
+  maxPartialReconciliationAttempts: number;
+  maxCalibrationVolatilityMultiplier: number;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
   requireAccountWideLock: boolean;
@@ -360,6 +389,12 @@ export const defaultPolicy: SafeloopPolicy = {
   maxPreemptionCancelProofWaitMs: 1_500,
   maxPreemptionCancelAcceptanceAgeMs: 5_000,
   minPreemptionCancelRpcQuorum: 2,
+  requireNonceBoundCancellation: true,
+  requireLockFencing: true,
+  maxLowPriorityQueueAheadOfEmergency: 3,
+  maxStaleGasReservationUsd: "0",
+  maxPartialReconciliationAttempts: 3,
+  maxCalibrationVolatilityMultiplier: 2,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
   requireAccountWideLock: true,
@@ -411,6 +446,8 @@ export function canonicalizeIntent(
     quoteId: intent.quoteId,
     pollingId: intent.pollingId,
     txHash: intent.txHash ? lowerAddress(intent.txHash) : undefined,
+    nonceDomain: intent.nonceDomain?.toLowerCase(),
+    nonce: intent.nonce,
     tokenContract: intent.tokenContract ? lowerAddress(intent.tokenContract) : undefined,
     tokenSymbol: intent.tokenSymbol?.toUpperCase(),
     isTestnetUsdc: intent.isTestnetUsdc,
@@ -550,6 +587,9 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
       !params.ledger.capabilities?.preemptionCancellation
     ) {
       ledgerReasons.push("PREEMPTION_CANCEL_REQUIRED");
+    }
+    if (policy.requireLockFencing && !params.ledger.capabilities?.lockFencing) {
+      ledgerReasons.push("LOCK_FENCING_REQUIRED");
     }
     if (
       policy.requireAccountWideLock &&
@@ -703,6 +743,9 @@ export function checkTrajectoryInvariants(params: {
   ) {
     reasons.add("PARTIAL_FILL_PENDING");
   }
+  if (hasPartialReconciliationLoop(current, history, policy)) {
+    reasons.add("PARTIAL_RECONCILIATION_LOOP");
+  }
   if (simulation.broadcastStatus === "expired") {
     reasons.add("BROADCAST_TRACKING_EXPIRED");
   }
@@ -717,6 +760,10 @@ export function checkTrajectoryInvariants(params: {
   }
   if (current.lockedUntil && isExpired(current.lockedUntil)) {
     reasons.add("LOCK_LEASE_EXPIRED");
+  }
+  if (policy.requireLockFencing && hasLockFencingGap(current, history)) {
+    reasons.add("LOCK_FENCING_REQUIRED");
+    reasons.add("LOCK_RELEASE_SPLIT_BRAIN");
   }
   if (
     policy.requireExplicitCollateralPool &&
@@ -820,6 +867,9 @@ export function checkTrajectoryInvariants(params: {
       ) {
         reasons.add("TIME_CALIBRATION_UNSAFE");
       }
+      if (isCalibrationOverfit(simulation, policy)) {
+        reasons.add("TIME_CALIBRATION_OVERFIT");
+      }
     }
     for (const reason of simulation.venueReasonCodes ?? []) {
       reasons.add(reason);
@@ -884,6 +934,19 @@ export function checkTrajectoryInvariants(params: {
     reasons.add("GLOBAL_COLLATERAL_LOCK_CONTENTION");
     reasons.add("GLOBAL_COLLATERAL_LOCK_REQUIRED");
     reasons.add("OVER_ALLOCATION_RISK");
+  }
+
+  if (hasNonceDomainCollision(current, history)) {
+    reasons.add("NONCE_DOMAIN_COLLISION");
+  }
+
+  if (isEmergencyGasAction(current)) {
+    if (requiresNonceDomainForEmergency(current, history)) {
+      reasons.add("NONCE_DOMAIN_REQUIRED");
+    }
+    if (lowPriorityQueueDepth(current, history) > policy.maxLowPriorityQueueAheadOfEmergency) {
+      reasons.add("EMERGENCY_CLOSE_STARVATION");
+    }
   }
 
   for (const row of history) {
@@ -1017,6 +1080,14 @@ export function checkTrajectoryInvariants(params: {
     }
   }
 
+  if (hasGasReservationDrift(history, policy)) {
+    reasons.add("GAS_RESERVATION_DRIFT");
+  }
+
+  if (hasGuardCompositionFailure(current, reasons)) {
+    reasons.add("GUARD_COMPOSITION_FAILURE");
+  }
+
   return [...reasons];
 }
 
@@ -1063,6 +1134,39 @@ function hasUnfilledExpectedSize(simulation: SimulationResult): boolean {
   }
 
   return parseMoney(simulation.filledSize) < parseMoney(simulation.expectedFillSize);
+}
+
+function hasPartialReconciliationLoop(
+  current: ActionLedgerRow,
+  history: ActionLedgerRow[],
+  policy: SafeloopPolicy,
+): boolean {
+  const priorPartialAttempts = history.filter(
+    (row) =>
+      sameSigningBoundary(row, current) &&
+      row.reasonCodes.includes("PARTIAL_FILL_PENDING"),
+  ).length;
+  return (
+    (current.partialFillCount ?? 0) >= policy.maxPartialReconciliationAttempts ||
+    priorPartialAttempts >= policy.maxPartialReconciliationAttempts
+  );
+}
+
+function isCalibrationOverfit(
+  simulation: SimulationResult,
+  policy: SafeloopPolicy,
+): boolean {
+  if (
+    simulation.volatilityBps === undefined ||
+    simulation.timeCalibrationMaxVolatilityBps === undefined
+  ) {
+    return false;
+  }
+  return (
+    simulation.volatilityBps >
+    simulation.timeCalibrationMaxVolatilityBps *
+      policy.maxCalibrationVolatilityMultiplier
+  );
 }
 
 function isEmergencyGasAction(intent: {
@@ -1130,6 +1234,12 @@ function preemptionBlockReasons(
     if (hasTimedOutCancelProofWait(prior, policy)) {
       reasons.add("CANCELLATION_PROOF_INDEXING_LAG");
     }
+    if (isCancellationProofStale(prior, policy)) {
+      reasons.add("CANCELLATION_PROOF_STALE");
+    }
+    if (hasFalsePositiveCancelRisk(prior, policy)) {
+      reasons.add("CANCEL_PROOF_FALSE_POSITIVE_RISK");
+    }
     if (prior.preemptionCancelStatus === "broadcast_accepted") {
       reasons.add("PREEMPTION_CANCEL_QUORUM_REQUIRED");
     }
@@ -1161,6 +1271,9 @@ function hasUsablePreemptionCancel(
     return false;
   }
   if (!row.preemptionCancelObservedAt) return false;
+  if (policy.requireNonceBoundCancellation && !hasNonceBoundCancelProof(row)) {
+    return false;
+  }
   return !isOlderThanMs(
     row.preemptionCancelObservedAt,
     policy.maxPreemptionCancelAcceptanceAgeMs,
@@ -1182,6 +1295,136 @@ function hasTimedOutCancelProofWait(
     row.preemptionCancelSubmittedAt,
     policy.maxPreemptionCancelProofWaitMs,
   );
+}
+
+function hasNonceBoundCancelProof(row: ActionLedgerRow): boolean {
+  return Boolean(
+    row.nonceDomain &&
+      row.preemptionCancelNonce !== undefined &&
+      (row.preemptionCancelReplacesTxHash || row.txHash),
+  );
+}
+
+function isCancellationProofStale(
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  return Boolean(
+    row.preemptionCancelStatus === "broadcast_accepted" &&
+      row.preemptionCancelObservedAt &&
+      isOlderThanMs(
+        row.preemptionCancelObservedAt,
+        policy.maxPreemptionCancelAcceptanceAgeMs,
+      ),
+  );
+}
+
+function hasFalsePositiveCancelRisk(
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  return Boolean(
+    row.preemptionCancelStatus === "broadcast_accepted" &&
+      policy.requireNonceBoundCancellation &&
+      !hasNonceBoundCancelProof(row),
+  );
+}
+
+function hasNonceDomainCollision(
+  current: ActionLedgerRow,
+  history: ActionLedgerRow[],
+): boolean {
+  if (!current.nonceDomain) return false;
+  return history.some(
+    (row) =>
+      row.intentId !== current.intentId &&
+      row.nonceDomain === current.nonceDomain &&
+      isLiveBroadcastRisk(row.status) &&
+      (row.lockOwnerId === undefined ||
+        current.lockOwnerId === undefined ||
+        row.lockOwnerId !== current.lockOwnerId),
+  );
+}
+
+function requiresNonceDomainForEmergency(
+  current: ActionLedgerRow,
+  history: ActionLedgerRow[],
+): boolean {
+  if (current.nonceDomain) return false;
+  return history.some(
+    (row) =>
+      current.globalCollateralLockScope !== undefined &&
+      row.globalCollateralLockScope === current.globalCollateralLockScope &&
+      row.intentId !== current.intentId &&
+      isLiveBroadcastRisk(row.status),
+  );
+}
+
+function lowPriorityQueueDepth(
+  current: ActionLedgerRow,
+  history: ActionLedgerRow[],
+): number {
+  return history.filter(
+    (row) =>
+      row.wallet === current.wallet &&
+      row.chainId === current.chainId &&
+      row.intentId !== current.intentId &&
+      row.priority === "low" &&
+      isActiveOrFinalDuplicate(row.status),
+  ).length;
+}
+
+function hasLockFencingGap(
+  current: ActionLedgerRow,
+  history: ActionLedgerRow[],
+): boolean {
+  return history.some((row) => {
+    if (
+      row.intentId === current.intentId ||
+      !sharesAnyLockScope(row, current) ||
+      !isActiveOrFinalDuplicate(row.status)
+    ) {
+      return false;
+    }
+    if (current.lockEpoch === undefined || row.lockEpoch === undefined) {
+      return true;
+    }
+    return current.lockEpoch <= row.lockEpoch;
+  });
+}
+
+function hasGasReservationDrift(
+  history: ActionLedgerRow[],
+  policy: SafeloopPolicy,
+): boolean {
+  const staleReservedGasUsd = history
+    .filter(
+      (row) =>
+        ["ABORTED", "SIGN_FAILED", "TIMED_OUT"].includes(row.status) &&
+        row.gasReservationStatus === "reserved",
+    )
+    .reduce((sum, row) => sum + parseMoney(row.gasReservedUsd ?? "0"), 0);
+  return staleReservedGasUsd > parseMoney(policy.maxStaleGasReservationUsd);
+}
+
+function hasGuardCompositionFailure(
+  current: ActionLedgerRow,
+  reasons: Set<AbortReason>,
+): boolean {
+  if (!isEmergencyGasAction(current)) return false;
+  const hasLivenessGuard =
+    reasons.has("GLOBAL_COLLATERAL_LOCK_CONTENTION") ||
+    reasons.has("PREEMPTION_LIVELOCK_RISK") ||
+    reasons.has("CANCELLATION_PROOF_INDEXING_LAG") ||
+    reasons.has("EMERGENCY_CLOSE_STARVATION");
+  const hasSafetyGuard =
+    reasons.has("TIME_CALIBRATION_REQUIRED") ||
+    reasons.has("TIME_CALIBRATION_STALE") ||
+    reasons.has("TIME_CALIBRATION_UNSAFE") ||
+    reasons.has("TIME_CALIBRATION_OVERFIT") ||
+    reasons.has("ORACLE_PRICE_STALE") ||
+    reasons.has("LOCK_RELEASE_SPLIT_BRAIN");
+  return hasLivenessGuard && hasSafetyGuard;
 }
 
 function requiresHip3Dex(

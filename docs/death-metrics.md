@@ -747,3 +747,219 @@ Implementation hook:
 - `SafeloopPolicy.minPreemptionCancelRpcQuorum`
 - `PREEMPTION_CANCEL_QUORUM_REQUIRED`
 - `CANCELLATION_PROOF_INDEXING_LAG`
+
+## DM-30: Cancellation Proof Staleness
+
+Severity: High
+
+Scenario:
+
+```text
+cancellation proof was observed earlier
+RPC or mempool state moves on
+emergency flow reuses old proof
+preempted transaction may still be live
+```
+
+Required guard:
+
+- Broadcast-accepted cancellation proof must have a freshness budget.
+- Stale proof fails closed even when quorum was once reached.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelObservedAt`
+- `SafeloopPolicy.maxPreemptionCancelAcceptanceAgeMs`
+- `CANCELLATION_PROOF_STALE`
+
+## DM-31: Shared Nonce Domain Collision
+
+Severity: Critical
+
+Scenario:
+
+```text
+multiple workers share one nonce domain
+one worker broadcasts a cancel
+another worker signs an emergency transaction in the same nonce domain
+the cancel replaces the emergency transaction
+```
+
+Required guard:
+
+- Emergency preemption must know its nonce domain.
+- Concurrent live actions in the same nonce domain are treated as collisions.
+
+Implementation hook:
+
+- `AgentIntent.nonceDomain`
+- `ActionLedgerRow.nonceDomain`
+- `NONCE_DOMAIN_REQUIRED`
+- `NONCE_DOMAIN_COLLISION`
+
+## DM-32: Proof-of-Cancel False Positive
+
+Severity: High
+
+Scenario:
+
+```text
+mempool appears to replace a transaction
+replacement proof is not bound to the nonce or original tx
+another propagation path later lands the original transaction
+system assumes cancel success too early
+```
+
+Required guard:
+
+- Accepted cancellation proof must be nonce-bound.
+- The proof must identify the nonce and the transaction it replaces.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelNonce`
+- `ActionLedgerRow.preemptionCancelReplacesTxHash`
+- `SafeloopPolicy.requireNonceBoundCancellation`
+- `CANCEL_PROOF_FALSE_POSITIVE_RISK`
+
+## DM-33: Emergency Close Starvation
+
+Severity: Critical
+
+Scenario:
+
+```text
+low-priority queue grows quickly
+emergency close gets a lock
+surrounding checks and queue pressure keep it from signing
+position remains exposed until liquidation
+```
+
+Required guard:
+
+- Emergency flows must fail closed when low-priority queue pressure exceeds
+  policy.
+- Operators need a distinct starvation reason instead of a generic lock abort.
+
+Implementation hook:
+
+- `SafeloopPolicy.maxLowPriorityQueueAheadOfEmergency`
+- `EMERGENCY_CLOSE_STARVATION`
+
+## DM-34: Lock Release Split Brain
+
+Severity: High
+
+Scenario:
+
+```text
+worker restarts around lease expiry
+one worker treats the old lease as dead
+another worker still believes it owns the lock
+both continue from different state assumptions
+```
+
+Required guard:
+
+- Locks need fencing tokens or equivalent monotonic ownership epochs.
+- Missing or non-increasing epochs are split-brain risk.
+
+Implementation hook:
+
+- `ActionLedgerRow.lockEpoch`
+- `Ledger.capabilities.lockFencing`
+- `LOCK_FENCING_REQUIRED`
+- `LOCK_RELEASE_SPLIT_BRAIN`
+
+## DM-35: Gas Reservation Drift
+
+Severity: Medium
+
+Scenario:
+
+```text
+preemption reserves gas
+preemption aborts
+reservation is never released
+runway appears exhausted even though gas was not spent
+```
+
+Required guard:
+
+- Aborted, failed, or timed-out actions must release unused gas reservations.
+- Stale reserved gas above policy is treated as drift.
+
+Implementation hook:
+
+- `ActionLedgerRow.gasReservationStatus`
+- `ActionLedgerRow.gasReservedUsd`
+- `GAS_RESERVATION_DRIFT`
+
+## DM-36: Calibration Overfit
+
+Severity: Medium
+
+Scenario:
+
+```text
+time calibration is learned during quiet markets
+market volatility regime changes
+stale oracle data slips through because thresholds are too relaxed
+```
+
+Required guard:
+
+- Calibration metadata must include the volatility regime it covered.
+- Current volatility above the calibrated regime fails closed.
+
+Implementation hook:
+
+- `SimulationResult.timeCalibrationMaxVolatilityBps`
+- `SafeloopPolicy.maxCalibrationVolatilityMultiplier`
+- `TIME_CALIBRATION_OVERFIT`
+
+## DM-37: Partial Reconciliation Loop
+
+Severity: High
+
+Scenario:
+
+```text
+order partially fills
+system marks neither success nor failure
+reconciliation retries keep oscillating
+agent never moves to cancel, fill, or new intent
+```
+
+Required guard:
+
+- Partial reconciliation attempts must have a cap.
+- Repeated partial-fill pending states become a distinct loop abort.
+
+Implementation hook:
+
+- `ActionLedgerRow.partialFillCount`
+- `SafeloopPolicy.maxPartialReconciliationAttempts`
+- `PARTIAL_RECONCILIATION_LOOP`
+
+## DM-38: Guard Composition Failure
+
+Severity: Critical
+
+Scenario:
+
+```text
+individual guards are each correct
+their combination breaks the emergency path
+one guard aborts before another guard can preserve liveness
+emergency transaction never signs
+```
+
+Required guard:
+
+- Emergency flows must surface liveness-vs-safety guard conflicts explicitly.
+- Operators should see composition failure instead of a generic abort set.
+
+Implementation hook:
+
+- `GUARD_COMPOSITION_FAILURE`

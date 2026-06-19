@@ -110,6 +110,14 @@ Recommended invariants:
 - block emergency preemption livelock during signing windows
 - require cancellation proof before preempting a live signed or broadcasting action
 - accept fresh multi-RPC cancellation broadcast quorum when RPC indexing lags
+- require nonce-bound cancellation proof to avoid false-positive mempool state
+- detect shared nonce-domain collisions across workers
+- detect low-priority floods that starve emergency close paths
+- detect lock-fencing split brain after worker restart
+- detect stale gas reservations from aborted preemption
+- detect overfit time calibration when volatility regimes change
+- stop oscillating partial-fill reconciliation loops
+- surface guard-composition failures instead of hiding them in generic aborts
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -132,6 +140,9 @@ Recommended invariants:
 - Tag emergency close/cancel intents with emergency priority.
 - Treat preempted signed or broadcasting requests as live until cancellation or nonce/fill reconciliation proves otherwise.
 - Do not put one RPC indexer's confirmation lag on the critical path for emergency exits.
+- Keep nonce domains explicit when multiple workers can sign or cancel.
+- Use lock fencing tokens so restarted workers cannot both believe they own the same scope.
+- Release unused gas reservations when preemption aborts.
 - Avoid implicit default collateral pools in production policies.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.
