@@ -731,20 +731,30 @@ position reaches liquidation before the proof appears
 Required guard:
 
 - Cancellation proof cannot depend on one RPC indexer becoming consistent.
-- A fresh replacement-broadcast acceptance from enough independent RPC paths can
-  satisfy the emergency gate while final indexing catches up.
-- The fallback must be bounded by age and quorum.
-- Stale or under-quorum acceptance still fails closed.
+- Multi-RPC broadcast acceptance can show propagation, but it is not final
+  cancellation proof.
+- The emergency gate requires ordered or confirmed cancellation proof by
+  default.
+- If RPC quorum partitions during a liquidation-risk event, only a reduce-only
+  or close-all emergency close may proceed without treating cancellation as
+  proven.
+- Stale, under-quorum, or mempool-only acceptance still fails closed for
+  non-reducing work.
 
 Implementation hook:
 
 - `ActionLedgerRow.preemptionCancelStatus`
 - `ActionLedgerRow.preemptionCancelSubmittedAt`
 - `ActionLedgerRow.preemptionCancelObservedAt`
+- `ActionLedgerRow.preemptionCancelOrderedAt`
+- `ActionLedgerRow.preemptionCancelOrderSource`
 - `ActionLedgerRow.preemptionCancelRpcQuorum`
+- `ActionLedgerRow.preemptionCancelQuorumFailure`
 - `SafeloopPolicy.maxPreemptionCancelProofWaitMs`
 - `SafeloopPolicy.maxPreemptionCancelAcceptanceAgeMs`
 - `SafeloopPolicy.minPreemptionCancelRpcQuorum`
+- `SafeloopPolicy.requireOrderedCancellationProof`
+- `SafeloopPolicy.allowReduceOnlyEmergencyDuringQuorumPartition`
 - `PREEMPTION_CANCEL_QUORUM_REQUIRED`
 - `CANCELLATION_PROOF_INDEXING_LAG`
 
@@ -755,16 +765,16 @@ Severity: High
 Scenario:
 
 ```text
-cancellation proof was observed earlier
+cancellation telemetry was observed earlier
 RPC or mempool state moves on
-emergency flow reuses old proof
+emergency flow reuses old acceptance
 preempted transaction may still be live
 ```
 
 Required guard:
 
-- Broadcast-accepted cancellation proof must have a freshness budget.
-- Stale proof fails closed even when quorum was once reached.
+- Broadcast acceptance telemetry must have a freshness budget.
+- Stale acceptance fails closed even when quorum was once reached.
 
 Implementation hook:
 
@@ -805,15 +815,16 @@ Scenario:
 
 ```text
 mempool appears to replace a transaction
-replacement proof is not bound to the nonce or original tx
+replacement observation is not bound to the nonce or original tx
 another propagation path later lands the original transaction
 system assumes cancel success too early
 ```
 
 Required guard:
 
-- Accepted cancellation proof must be nonce-bound.
-- The proof must identify the nonce and the transaction it replaces.
+- Cancellation evidence must be nonce-bound.
+- Ordered or confirmed proof must identify the nonce and the transaction it
+  replaces.
 
 Implementation hook:
 
@@ -963,3 +974,65 @@ Required guard:
 Implementation hook:
 
 - `GUARD_COMPOSITION_FAILURE`
+
+## DM-39: Mempool Quorum Illusion
+
+Severity: Critical
+
+Scenario:
+
+```text
+low-priority transaction is already propagating
+emergency flow broadcasts a same-nonce cancel
+multiple RPCs accept the cancel into their mempools
+builder, sequencer, or validator ordering still lands the original transaction
+system assumes cancellation and sends the emergency transaction
+both effects execute or a closed position reopens
+```
+
+Required guard:
+
+- Mempool quorum is not cancellation proof.
+- Broadcast acceptance is telemetry only unless policy explicitly disables
+  ordered proof requirements.
+- Default policy requires ordered or confirmed cancellation proof before a
+  non-partition emergency proceeds.
+- Mempool-only quorum produces a distinct `MEMPOOL_QUORUM_ILLUSION` abort.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelStatus = "ordered"`
+- `ActionLedgerRow.preemptionCancelOrderedAt`
+- `ActionLedgerRow.preemptionCancelOrderSource`
+- `SafeloopPolicy.requireOrderedCancellationProof`
+- `MEMPOOL_QUORUM_ILLUSION`
+
+## DM-40: RPC Quorum Partition Lock
+
+Severity: High
+
+Scenario:
+
+```text
+market volatility spikes
+emergency close starts cancellation
+RPCs return 429, timeout, or inconsistent partitioned results
+quorum cannot form inside the emergency window
+fail-closed cancellation gate blocks the close
+account reaches liquidation before the guard clears
+```
+
+Required guard:
+
+- RPC quorum failure is tracked separately from failed cancellation proof.
+- Non-reduce-only emergency work still fails closed during partition.
+- Reduce-only or close-all emergency closes can proceed through a narrow
+  partition escape without marking the prior transaction canceled.
+- The escape must remain exposure-reducing and nonce-domain aware.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelQuorumFailure`
+- `AgentIntent.reduceOnly`
+- `SafeloopPolicy.allowReduceOnlyEmergencyDuringQuorumPartition`
+- `RPC_QUORUM_PARTITION`

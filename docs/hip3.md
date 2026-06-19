@@ -109,7 +109,8 @@ Recommended invariants:
 - require durable time calibration for cold-start worker oracle checks
 - block emergency preemption livelock during signing windows
 - require cancellation proof before preempting a live signed or broadcasting action
-- accept fresh multi-RPC cancellation broadcast quorum when RPC indexing lags
+- treat multi-RPC broadcast acceptance as telemetry, not ordered proof
+- allow reduce-only close-all emergency paths during RPC quorum partition
 - require nonce-bound cancellation proof to avoid false-positive mempool state
 - detect shared nonce-domain collisions across workers
 - detect low-priority floods that starve emergency close paths
@@ -140,6 +141,8 @@ Recommended invariants:
 - Tag emergency close/cancel intents with emergency priority.
 - Treat preempted signed or broadcasting requests as live until cancellation or nonce/fill reconciliation proves otherwise.
 - Do not put one RPC indexer's confirmation lag on the critical path for emergency exits.
+- Do not treat mempool quorum as final cancellation.
+- Use reduce-only or close-all emergency intents for partition escape paths.
 - Keep nonce domains explicit when multiple workers can sign or cancel.
 - Use lock fencing tokens so restarted workers cannot both believe they own the same scope.
 - Release unused gas reservations when preemption aborts.

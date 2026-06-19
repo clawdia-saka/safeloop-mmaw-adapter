@@ -30,7 +30,10 @@ create table if not exists safeloop_action_ledger (
   preemption_cancel_replaces_tx_hash text,
   preemption_cancel_submitted_at timestamptz,
   preemption_cancel_observed_at timestamptz,
+  preemption_cancel_ordered_at timestamptz,
+  preemption_cancel_order_source text,
   preemption_cancel_rpc_quorum integer,
+  preemption_cancel_quorum_failure text,
   gas_reservation_status text not null default 'none',
   gas_reserved_usd numeric,
   gas_reservation_updated_at timestamptz,
@@ -316,7 +319,10 @@ create or replace function safeloop_mark_preemption_cancel(
   p_cancel_replaces_tx_hash text default null,
   p_submitted_at timestamptz default null,
   p_observed_at timestamptz default null,
-  p_rpc_quorum integer default null
+  p_ordered_at timestamptz default null,
+  p_order_source text default null,
+  p_rpc_quorum integer default null,
+  p_quorum_failure text default null
 )
 returns void
 language sql
@@ -328,7 +334,10 @@ as $$
       preemption_cancel_replaces_tx_hash = p_cancel_replaces_tx_hash,
       preemption_cancel_submitted_at = p_submitted_at,
       preemption_cancel_observed_at = p_observed_at,
-      preemption_cancel_rpc_quorum = p_rpc_quorum
+      preemption_cancel_ordered_at = p_ordered_at,
+      preemption_cancel_order_source = p_order_source,
+      preemption_cancel_rpc_quorum = p_rpc_quorum,
+      preemption_cancel_quorum_failure = p_quorum_failure
   where intent_id = p_intent_id;
 $$;
 

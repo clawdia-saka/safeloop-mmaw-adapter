@@ -32,6 +32,7 @@ export function canonicalizePerpsFields(intent: AgentIntent): Partial<CanonicalI
     maxSlippageBps: intent.maxSlippageBps,
     orderId: intent.orderId,
     closeAll: intent.closeAll,
+    reduceOnly: intent.reduceOnly,
   };
 }
 

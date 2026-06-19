@@ -45,7 +45,7 @@ Safeloop owns:
 - cold-start-safe durable time calibration
 - preemption livelock controls
 - cancellation proof for preempted live transactions
-- bounded cancellation acceptance for RPC indexing lag
+- ordered cancellation proof and RPC partition handling
 - nonce-domain and lock-fencing controls for concurrent workers
 - gas reservation and partial-fill loop controls
 - guard-composition checks for emergency flows
@@ -290,17 +290,22 @@ Preemption is deliberately narrow:
 - very new locks cannot be preempted immediately after creation
 - a prior signed, submitted, MFA-waiting, or broadcasting action needs
   cancellation proof before the emergency task can proceed
-- a fresh multi-RPC broadcast acceptance can satisfy the cancellation gate while
-  waiting for slower RPC indexes to expose the mined replacement transaction
-- accepted cancellation proof must be nonce-bound to the transaction it replaces
+- mempool or broadcast acceptance quorum is telemetry only, not cancellation
+  proof
+- cancellation proof must be ordered or confirmed unless policy explicitly
+  allows a partition escape
+- ordered and confirmed cancellation proof must be nonce-bound to the
+  transaction it replaces
+- during RPC quorum partition, only reduce-only or close-all emergency closes
+  can proceed without claiming that the prior transaction was canceled
 - concurrent workers sharing a nonce domain are treated as a collision
 - stale gas reservations from aborted preemptions must be released or reconciled
 
 This prevents emergency tasks from repeatedly killing each other before any
 transaction reaches the venue. It also prevents Safeloop from treating a
 preempted database row as dead while the physical transaction may still land.
-The fallback is bounded by age and quorum so a single lagging or lying endpoint
-does not become the source of truth.
+The partition escape is narrow so a lagging RPC quorum does not become the
+source of truth or the only emergency path.
 
 Emergency flows also get a composition check. If liveness guards and safety
 guards both fire, Safeloop reports `GUARD_COMPOSITION_FAILURE` so operators can

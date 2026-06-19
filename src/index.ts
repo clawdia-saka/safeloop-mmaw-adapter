@@ -104,6 +104,8 @@ export type AbortReason =
   | "PREEMPTION_CANCEL_REQUIRED"
   | "PREEMPTION_CANCEL_QUORUM_REQUIRED"
   | "CANCELLATION_PROOF_INDEXING_LAG"
+  | "MEMPOOL_QUORUM_ILLUSION"
+  | "RPC_QUORUM_PARTITION"
   | "CANCELLATION_PROOF_STALE"
   | "CANCEL_PROOF_FALSE_POSITIVE_RISK"
   | "NONCE_DOMAIN_REQUIRED"
@@ -158,6 +160,7 @@ export type AgentIntent = {
   maxSlippageBps?: string;
   orderId?: string;
   closeAll?: boolean;
+  reduceOnly?: boolean;
 };
 
 export type CanonicalIntent = Omit<AgentIntent, "calldata" | "route"> & {
@@ -189,13 +192,17 @@ export type ActionLedgerRow = CanonicalIntent & {
     | "required"
     | "submitted"
     | "broadcast_accepted"
+    | "ordered"
     | "confirmed";
   preemptionCancelTxHash?: `0x${string}`;
   preemptionCancelNonce?: number;
   preemptionCancelReplacesTxHash?: `0x${string}`;
   preemptionCancelSubmittedAt?: string;
   preemptionCancelObservedAt?: string;
+  preemptionCancelOrderedAt?: string;
+  preemptionCancelOrderSource?: "builder" | "sequencer" | "chain";
   preemptionCancelRpcQuorum?: number;
+  preemptionCancelQuorumFailure?: "rate_limited" | "timeout" | "partitioned";
   gasReservationStatus?: "none" | "reserved" | "released" | "consumed";
   gasReservedUsd?: string;
   gasReservationUpdatedAt?: string;
@@ -338,6 +345,8 @@ export type SafeloopPolicy = {
   maxPreemptionCancelAcceptanceAgeMs: number;
   minPreemptionCancelRpcQuorum: number;
   requireNonceBoundCancellation: boolean;
+  requireOrderedCancellationProof: boolean;
+  allowReduceOnlyEmergencyDuringQuorumPartition: boolean;
   requireLockFencing: boolean;
   maxLowPriorityQueueAheadOfEmergency: number;
   maxStaleGasReservationUsd: string;
@@ -390,6 +399,8 @@ export const defaultPolicy: SafeloopPolicy = {
   maxPreemptionCancelAcceptanceAgeMs: 5_000,
   minPreemptionCancelRpcQuorum: 2,
   requireNonceBoundCancellation: true,
+  requireOrderedCancellationProof: true,
+  allowReduceOnlyEmergencyDuringQuorumPartition: true,
   requireLockFencing: true,
   maxLowPriorityQueueAheadOfEmergency: 3,
   maxStaleGasReservationUsd: "0",
@@ -1227,7 +1238,8 @@ function preemptionBlockReasons(
   if (
     policy.requirePreemptionCancellation &&
     isLiveBroadcastRisk(prior.status) &&
-    !hasUsablePreemptionCancel(prior, policy)
+    !hasUsablePreemptionCancel(prior, policy) &&
+    !canUsePartitionEmergencyBypass(current, prior, policy)
   ) {
     reasons.add("PREEMPTION_CANCEL_REQUIRED");
     reasons.add("PREEMPTED_TX_STILL_LIVE");
@@ -1240,7 +1252,17 @@ function preemptionBlockReasons(
     if (hasFalsePositiveCancelRisk(prior, policy)) {
       reasons.add("CANCEL_PROOF_FALSE_POSITIVE_RISK");
     }
-    if (prior.preemptionCancelStatus === "broadcast_accepted") {
+    if (hasMempoolQuorumIllusion(prior, policy)) {
+      reasons.add("MEMPOOL_QUORUM_ILLUSION");
+    }
+    if (hasRpcQuorumPartition(prior)) {
+      reasons.add("RPC_QUORUM_PARTITION");
+    }
+    if (
+      prior.preemptionCancelStatus === "broadcast_accepted" &&
+      (prior.preemptionCancelRpcQuorum ?? 0) <
+        policy.minPreemptionCancelRpcQuorum
+    ) {
       reasons.add("PREEMPTION_CANCEL_QUORUM_REQUIRED");
     }
   }
@@ -1266,7 +1288,13 @@ function hasUsablePreemptionCancel(
   policy: SafeloopPolicy,
 ): boolean {
   if (row.preemptionCancelStatus === "confirmed") return true;
+  if (row.preemptionCancelStatus === "ordered") {
+    return !(
+      policy.requireNonceBoundCancellation && !hasNonceBoundCancelProof(row)
+    );
+  }
   if (row.preemptionCancelStatus !== "broadcast_accepted") return false;
+  if (policy.requireOrderedCancellationProof) return false;
   if ((row.preemptionCancelRpcQuorum ?? 0) < policy.minPreemptionCancelRpcQuorum) {
     return false;
   }
@@ -1277,6 +1305,25 @@ function hasUsablePreemptionCancel(
   return !isOlderThanMs(
     row.preemptionCancelObservedAt,
     policy.maxPreemptionCancelAcceptanceAgeMs,
+  );
+}
+
+function canUsePartitionEmergencyBypass(
+  current: ActionLedgerRow,
+  prior: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  return (
+    policy.allowReduceOnlyEmergencyDuringQuorumPartition &&
+    hasRpcQuorumPartition(prior) &&
+    isExposureReducingEmergency(current)
+  );
+}
+
+function isExposureReducingEmergency(row: ActionLedgerRow): boolean {
+  return (
+    row.actionType === "perps_close" &&
+    (row.reduceOnly === true || row.closeAll === true)
   );
 }
 
@@ -1303,6 +1350,23 @@ function hasNonceBoundCancelProof(row: ActionLedgerRow): boolean {
       row.preemptionCancelNonce !== undefined &&
       (row.preemptionCancelReplacesTxHash || row.txHash),
   );
+}
+
+function hasMempoolQuorumIllusion(
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  return Boolean(
+    policy.requireOrderedCancellationProof &&
+      row.preemptionCancelStatus === "broadcast_accepted" &&
+      (row.preemptionCancelRpcQuorum ?? 0) >=
+        policy.minPreemptionCancelRpcQuorum &&
+      !row.preemptionCancelOrderedAt,
+  );
+}
+
+function hasRpcQuorumPartition(row: ActionLedgerRow): boolean {
+  return Boolean(row.preemptionCancelQuorumFailure);
 }
 
 function isCancellationProofStale(

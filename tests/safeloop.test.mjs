@@ -898,7 +898,7 @@ test("allows emergency preemption after live tx cancellation is confirmed", () =
   assert.ok(!reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
 });
 
-test("allows emergency preemption with fresh cancellation broadcast quorum", () => {
+test("allows emergency preemption with ordered cancellation proof", () => {
   const current = row({
     actionType: "perps_close",
     venue: "hyperliquid",
@@ -931,12 +931,14 @@ test("allows emergency preemption with fresh cancellation broadcast quorum", () 
   prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
   prior.nonceDomain = "wallet:42161";
   prior.txHash = "0x0000000000000000000000000000000000000002";
-  prior.preemptionCancelStatus = "broadcast_accepted";
+  prior.preemptionCancelStatus = "ordered";
   prior.preemptionCancelNonce = 7;
   prior.preemptionCancelReplacesTxHash =
     "0x0000000000000000000000000000000000000002";
   prior.preemptionCancelSubmittedAt = new Date(Date.now() - 500).toISOString();
   prior.preemptionCancelObservedAt = new Date().toISOString();
+  prior.preemptionCancelOrderedAt = new Date().toISOString();
+  prior.preemptionCancelOrderSource = "sequencer";
   prior.preemptionCancelRpcQuorum = defaultPolicy.minPreemptionCancelRpcQuorum;
 
   const reasons = checkTrajectoryInvariants({
@@ -956,6 +958,175 @@ test("allows emergency preemption with fresh cancellation broadcast quorum", () 
   assert.ok(!reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
   assert.ok(!reasons.includes("PREEMPTED_TX_STILL_LIVE"));
   assert.ok(!reasons.includes("CANCELLATION_PROOF_INDEXING_LAG"));
+  assert.ok(!reasons.includes("MEMPOOL_QUORUM_ILLUSION"));
+});
+
+test("rejects mempool quorum illusion without ordered cancellation proof", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+  prior.nonceDomain = "wallet:42161";
+  prior.txHash = "0x0000000000000000000000000000000000000003";
+  prior.preemptionCancelStatus = "broadcast_accepted";
+  prior.preemptionCancelNonce = 7;
+  prior.preemptionCancelReplacesTxHash =
+    "0x0000000000000000000000000000000000000003";
+  prior.preemptionCancelSubmittedAt = new Date(Date.now() - 500).toISOString();
+  prior.preemptionCancelObservedAt = new Date().toISOString();
+  prior.preemptionCancelRpcQuorum = defaultPolicy.minPreemptionCancelRpcQuorum;
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
+  assert.ok(reasons.includes("MEMPOOL_QUORUM_ILLUSION"));
+});
+
+test("flags RPC quorum partition for non-reduce-only emergency", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  current.nonceDomain = "wallet:42161";
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+  prior.preemptionCancelStatus = "submitted";
+  prior.preemptionCancelQuorumFailure = "rate_limited";
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
+  assert.ok(reasons.includes("RPC_QUORUM_PARTITION"));
+});
+
+test("allows reduce-only emergency close during RPC quorum partition", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+    closeAll: true,
+    reduceOnly: true,
+    nonceDomain: "wallet:42161",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+  prior.preemptionCancelStatus = "submitted";
+  prior.preemptionCancelQuorumFailure = "timeout";
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
+  assert.ok(!reasons.includes("RPC_QUORUM_PARTITION"));
+  assert.ok(!reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
 });
 
 test("flags cancellation proof indexing lag after proof wait budget", () => {
