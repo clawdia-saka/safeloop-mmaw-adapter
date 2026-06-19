@@ -106,6 +106,9 @@ Recommended invariants:
 - require monotonic oracle age and clock-skew checks
 - allow emergency close/cancel flows to preempt lower-priority collateral locks
 - require explicit collateral pool identity for shared collateral paths
+- require durable time calibration for cold-start worker oracle checks
+- block emergency preemption livelock during signing windows
+- require cancellation proof before preempting a live signed or broadcasting action
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -124,7 +127,9 @@ Recommended invariants:
 - Include in-flight gas reservations and reverted gas burn in runway accounting.
 - Renew or explicitly reconcile MFA-wait locks before their lease expires.
 - Do not rely on local wall-clock time alone for oracle freshness.
+- Do not rely on process-local monotonic timers alone after serverless cold start.
 - Tag emergency close/cancel intents with emergency priority.
+- Treat preempted signed or broadcasting requests as live until cancellation or nonce/fill reconciliation proves otherwise.
 - Avoid implicit default collateral pools in production policies.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.

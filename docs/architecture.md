@@ -42,6 +42,9 @@ Safeloop owns:
 - monotonic oracle-age checks and clock-drift limits
 - priority-aware lock handling for emergency exits
 - explicit collateral pool identity
+- cold-start-safe durable time calibration
+- preemption livelock controls
+- cancellation proof for preempted live transactions
 
 ## Runtime Flow
 
@@ -134,6 +137,7 @@ Required properties:
 - lock lease renewal for human approval windows
 - signer-bound idempotency or equivalent intent binding
 - priority-aware lock acquisition for emergency actions
+- preemption cancellation tracking for live transaction risk
 - transactionally written before signing
 - retained across process restarts
 
@@ -255,6 +259,11 @@ Freshness checks should prefer monotonic age captured by the simulator over
 local wall-clock deltas. If the simulator reports local clock skew above policy,
 Safeloop fails closed instead of relying on a drifting host clock.
 
+Serverless and edge workers cannot rely on process-local monotonic timers after
+cold start. For perps actions, the simulation must include durable time
+calibration metadata from shared storage or an equivalent trusted source.
+Missing, stale, or slow calibration fails closed.
+
 ### Gas Runway
 
 Reject new opens when native gas balance, estimated max gas cost, or recent gas
@@ -269,6 +278,18 @@ reconciled.
 
 Emergency close, cancel, and withdraw actions may preempt lower-priority global
 collateral locks. Normal opens cannot use this path.
+
+Preemption is deliberately narrow:
+
+- a task already in `SIGNING` gets a short non-preemptable window
+- repeated preemptions inside the policy window are treated as livelock risk
+- very new locks cannot be preempted immediately after creation
+- a prior signed, submitted, MFA-waiting, or broadcasting action needs
+  cancellation proof before the emergency task can proceed
+
+This prevents emergency tasks from repeatedly killing each other before any
+transaction reaches the venue. It also prevents Safeloop from treating a
+preempted database row as dead while the physical transaction may still land.
 
 ### Collateral Pool Identity
 

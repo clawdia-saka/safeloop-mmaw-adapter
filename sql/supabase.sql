@@ -19,6 +19,13 @@ create table if not exists safeloop_action_ledger (
   signature_expires_at timestamptz,
   in_flight_gas_usd numeric,
   reverted_gas_usd numeric,
+  preemption_count integer not null default 0,
+  last_preempted_at timestamptz,
+  preemption_cancel_status text not null default 'not_required',
+  preemption_cancel_tx_hash text,
+  time_calibration_source text,
+  time_calibration_synced_at timestamptz,
+  time_calibration_round_trip_ms integer,
   canonical_intent jsonb not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -251,6 +258,49 @@ language sql
 as $$
   update safeloop_action_ledger
   set signature_expires_at = p_signature_expires_at
+  where intent_id = p_intent_id;
+$$;
+
+create or replace function safeloop_mark_preemption_required(
+  p_preempted_intent_id text
+)
+returns void
+language sql
+as $$
+  update safeloop_action_ledger
+  set preemption_count = preemption_count + 1,
+      last_preempted_at = now(),
+      preemption_cancel_status = 'required'
+  where intent_id = p_preempted_intent_id;
+$$;
+
+create or replace function safeloop_mark_preemption_cancel(
+  p_intent_id text,
+  p_cancel_status text,
+  p_cancel_tx_hash text default null
+)
+returns void
+language sql
+as $$
+  update safeloop_action_ledger
+  set preemption_cancel_status = p_cancel_status,
+      preemption_cancel_tx_hash = p_cancel_tx_hash
+  where intent_id = p_intent_id;
+$$;
+
+create or replace function safeloop_mark_time_calibration(
+  p_intent_id text,
+  p_source text,
+  p_synced_at timestamptz,
+  p_round_trip_ms integer
+)
+returns void
+language sql
+as $$
+  update safeloop_action_ledger
+  set time_calibration_source = p_source,
+      time_calibration_synced_at = p_synced_at,
+      time_calibration_round_trip_ms = p_round_trip_ms
   where intent_id = p_intent_id;
 $$;
 

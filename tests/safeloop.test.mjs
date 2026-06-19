@@ -29,6 +29,9 @@ const baseSimulation = {
   slippageUsd: "0",
   maxLossUsd: "25",
   signatureExpiresAt: new Date(Date.now() + 10_000).toISOString(),
+  timeCalibrationSource: "durable",
+  timeCalibrationSyncedAt: new Date().toISOString(),
+  timeCalibrationRoundTripMs: 20,
 };
 
 test("qualifies HIP-3 symbols with builder DEX identity", () => {
@@ -214,6 +217,7 @@ test("verifies lock ownership immediately before signing", async () => {
       lockLeaseRenewal: true,
       inFlightGasAccounting: true,
       priorityLocks: true,
+      preemptionCancellation: true,
     },
     tryLock: async () => true,
     verifyLock: async () => false,
@@ -266,6 +270,7 @@ test("requires signer-bound intent protection against rollback replay", async ()
       lockLeaseRenewal: true,
       inFlightGasAccounting: true,
       priorityLocks: true,
+      preemptionCancellation: true,
     },
     tryLock: async () => true,
     verifyLock: async () => true,
@@ -550,8 +555,10 @@ test("locks shared collateral across different venues", () => {
   prior.intentId = "prior";
   prior.idempotencyKey = "prior-key";
   prior.globalCollateralLockScope = current.globalCollateralLockScope;
-  prior.status = "BROADCASTING";
+  prior.status = "LOCKED";
   prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
 
   const reasons = checkTrajectoryInvariants({
     current,
@@ -597,8 +604,10 @@ test("lets emergency close preempt lower-priority global collateral lock", () =>
   prior.intentId = "prior";
   prior.idempotencyKey = "prior-key";
   prior.globalCollateralLockScope = current.globalCollateralLockScope;
-  prior.status = "BROADCASTING";
+  prior.status = "LOCKED";
   prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
 
   const reasons = checkTrajectoryInvariants({
     current,
@@ -616,6 +625,275 @@ test("lets emergency close preempt lower-priority global collateral lock", () =>
 
   assert.ok(!reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
   assert.ok(!reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("requires durable time calibration for perps oracle monotonic age", () => {
+  const current = row({
+    actionType: "perps_open",
+    collateralPoolId: "main-usdc",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+      timeCalibrationSource: "local",
+      timeCalibrationSyncedAt: undefined,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("TIME_CALIBRATION_REQUIRED"));
+});
+
+test("rejects stale or slow durable time calibration", () => {
+  const current = row({
+    actionType: "perps_open",
+    collateralPoolId: "main-usdc",
+    dex: "xyz",
+    symbol: "btc",
+    side: "long",
+    size: "1",
+    leverage: "3",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+      timeCalibrationSource: "durable",
+      timeCalibrationSyncedAt: new Date(
+        Date.now() - defaultPolicy.maxTimeCalibrationAgeMs - 1,
+      ).toISOString(),
+      timeCalibrationRoundTripMs:
+        defaultPolicy.maxTimeCalibrationRoundTripMs + 1,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("TIME_CALIBRATION_STALE"));
+  assert.ok(reasons.includes("TIME_CALIBRATION_UNSAFE"));
+});
+
+test("blocks preemption during non-preemptable signing window", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "SIGNING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date().toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("NON_PREEMPTABLE_SIGNING_LOCK"));
+  assert.ok(reasons.includes("PREEMPTION_LIVELOCK_RISK"));
+});
+
+test("rate-limits repeated emergency preemptions in the same window", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "LOCKED";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+  prior.preemptionCount = defaultPolicy.maxPreemptionsPerWindow;
+  prior.lastPreemptedAt = new Date().toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("PREEMPTION_LIVELOCK_RISK"));
+});
+
+test("requires cancellation proof before preempting a live broadcast risk", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
+  assert.ok(reasons.includes("PREEMPTED_TX_STILL_LIVE"));
+  assert.ok(reasons.includes("GLOBAL_COLLATERAL_LOCK_CONTENTION"));
+});
+
+test("allows emergency preemption after live tx cancellation is confirmed", () => {
+  const current = row({
+    actionType: "perps_close",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-a",
+    symbol: "btc",
+    size: "1",
+    priority: "emergency",
+  });
+  current.globalCollateralLockScope = makeGlobalCollateralLockScope(current);
+  current.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+
+  const prior = row({
+    actionType: "perps_open",
+    venue: "hyperliquid",
+    collateralPoolId: "main-usdc",
+    dex: "dex-b",
+    symbol: "eth",
+    side: "long",
+    size: "10",
+    leverage: "3",
+    priority: "low",
+  });
+  prior.intentId = "prior";
+  prior.idempotencyKey = "prior-key";
+  prior.globalCollateralLockScope = current.globalCollateralLockScope;
+  prior.status = "BROADCASTING";
+  prior.lockedUntil = new Date(Date.now() + 60_000).toISOString();
+  prior.createdAt = new Date(Date.now() - 10_000).toISOString();
+  prior.updatedAt = new Date(Date.now() - 10_000).toISOString();
+  prior.preemptionCancelStatus = "confirmed";
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+      oracleObservedAt: new Date().toISOString(),
+      oracleMonotonicAgeMs: 100,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(!reasons.includes("PREEMPTION_CANCEL_REQUIRED"));
+  assert.ok(!reasons.includes("PREEMPTED_TX_STILL_LIVE"));
+  assert.ok(!reasons.includes("GLOBAL_COLLATERAL_LOCK_REQUIRED"));
 });
 
 test("requires explicit collateral pool for shared collateral locks", () => {

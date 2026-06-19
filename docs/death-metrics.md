@@ -622,3 +622,93 @@ Implementation hook:
 - `makeGlobalCollateralLockScope(...)`
 - `COLLATERAL_POOL_REQUIRED`
 - `POOL_LEAKAGE_RISK`
+
+## DM-26: Monotonic Drift Desync in Stateless Workers
+
+Severity: High
+
+Scenario:
+
+```text
+serverless worker cold-starts
+process-local monotonic timer starts at zero
+calibration state is missing or slow to load
+old oracle input looks safe during the first few actions
+stale pricing reaches signing
+```
+
+Required guard:
+
+- Perps simulations must include durable time calibration metadata.
+- Calibration must be recent and fast enough to trust.
+- Local process timers are not enough in stateless worker environments.
+
+Implementation hook:
+
+- `SimulationResult.timeCalibrationSource`
+- `SimulationResult.timeCalibrationSyncedAt`
+- `SimulationResult.timeCalibrationRoundTripMs`
+- `TIME_CALIBRATION_REQUIRED`
+- `TIME_CALIBRATION_STALE`
+- `TIME_CALIBRATION_UNSAFE`
+
+## DM-27: Preemption Cascade and Livelock Thrashing
+
+Severity: High
+
+Scenario:
+
+```text
+market drops quickly
+several emergency tasks appear in milliseconds
+each higher-priority task preempts the previous one
+signing keeps aborting before any close or cancel reaches the venue
+account stays exposed until liquidation
+```
+
+Required guard:
+
+- A lock in `SIGNING` needs a short non-preemptable window.
+- Repeated preemptions in the same policy window must fail closed.
+- Very new locks should not be preempted immediately after creation.
+
+Implementation hook:
+
+- `SafeloopPolicy.nonPreemptableSigningMs`
+- `SafeloopPolicy.minPreemptionAgeMs`
+- `SafeloopPolicy.preemptionWindowMs`
+- `SafeloopPolicy.maxPreemptionsPerWindow`
+- `NON_PREEMPTABLE_SIGNING_LOCK`
+- `PREEMPTION_LIVELOCK_RISK`
+
+## DM-28: Phantom Broadcast of Preempted Low-Priority Tx
+
+Severity: Critical
+
+Scenario:
+
+```text
+low-priority action starts signing or broadcasting
+emergency action preempts the database lock
+the first physical transaction is already in a queue
+emergency simulation assumes the first action is dead
+both transactions later land
+exposure doubles or a close is followed by a reopen
+```
+
+Required guard:
+
+- A preempted signed, submitted, MFA-waiting, or broadcasting action remains
+  live until cancellation or reconciliation proves otherwise.
+- Emergency preemption must require cancellation proof when the prior action may
+  already have escaped storage control.
+- Production integrations should use nonce replacement, venue-native cancel,
+  short time-in-force, or equivalent proof before proceeding.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelStatus`
+- `ActionLedgerRow.preemptionCancelTxHash`
+- `Ledger.capabilities.preemptionCancellation`
+- `PREEMPTION_CANCEL_REQUIRED`
+- `PREEMPTED_TX_STILL_LIVE`

@@ -84,6 +84,9 @@ export type AbortReason =
   | "STALE_RECONCILIATION"
   | "CLOCK_DRIFT_LIMIT"
   | "ORACLE_MONOTONIC_AGE_REQUIRED"
+  | "TIME_CALIBRATION_REQUIRED"
+  | "TIME_CALIBRATION_STALE"
+  | "TIME_CALIBRATION_UNSAFE"
   | "ORACLE_PRICE_STALE"
   | "NON_EVM_SIMULATION_REQUIRED"
   | "MARGIN_RATIO_LIMIT"
@@ -96,6 +99,10 @@ export type AbortReason =
   | "PARTIAL_FILL_PENDING"
   | "OVER_ALLOCATION_RISK"
   | "LOCK_LEASE_EXTENSION_REQUIRED"
+  | "NON_PREEMPTABLE_SIGNING_LOCK"
+  | "PREEMPTION_LIVELOCK_RISK"
+  | "PREEMPTION_CANCEL_REQUIRED"
+  | "PREEMPTED_TX_STILL_LIVE"
   | "UNKNOWN_STATE";
 
 export type AgentIntent = {
@@ -159,6 +166,10 @@ export type ActionLedgerRow = CanonicalIntent & {
   lockOwnerId?: string;
   lockedUntil?: string;
   signatureExpiresAt?: string;
+  preemptionCount?: number;
+  lastPreemptedAt?: string;
+  preemptionCancelStatus?: "not_required" | "required" | "submitted" | "confirmed";
+  preemptionCancelTxHash?: `0x${string}`;
   createdAt: string;
   updatedAt: string;
 };
@@ -180,6 +191,9 @@ export type SimulationResult = {
   oracleMonotonicAgeMs?: number;
   oracleSource?: string;
   clockSkewMs?: number;
+  timeCalibrationSource?: "durable" | "local" | "unknown";
+  timeCalibrationSyncedAt?: string;
+  timeCalibrationRoundTripMs?: number;
   volatilityBps?: number;
   signatureExpiresAt?: string;
   filledSize?: string;
@@ -225,6 +239,7 @@ export type Ledger = {
     lockLeaseRenewal?: boolean;
     inFlightGasAccounting?: boolean;
     priorityLocks?: boolean;
+    preemptionCancellation?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   verifyLock?(row: ActionLedgerRow): Promise<boolean>;
@@ -272,12 +287,20 @@ export type SafeloopPolicy = {
   highVolatilityOracleAgeMs: number;
   oracleVolatilityThresholdBps: number;
   requireMonotonicOracleAge: boolean;
+  requireDurableTimeCalibration: boolean;
   maxClockSkewMs: number;
+  maxTimeCalibrationAgeMs: number;
+  maxTimeCalibrationRoundTripMs: number;
   requireExpiringSignatures: boolean;
   requireSignerIntentBinding: boolean;
   maxSignatureTtlMs: number;
   maxHumanApprovalMs: number;
   maxGlobalCollateralContentionMs: number;
+  minPreemptionAgeMs: number;
+  nonPreemptableSigningMs: number;
+  preemptionWindowMs: number;
+  maxPreemptionsPerWindow: number;
+  requirePreemptionCancellation: boolean;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
   requireAccountWideLock: boolean;
@@ -307,12 +330,20 @@ export const defaultPolicy: SafeloopPolicy = {
   highVolatilityOracleAgeMs: 500,
   oracleVolatilityThresholdBps: 250,
   requireMonotonicOracleAge: true,
+  requireDurableTimeCalibration: true,
   maxClockSkewMs: 250,
+  maxTimeCalibrationAgeMs: 60_000,
+  maxTimeCalibrationRoundTripMs: 250,
   requireExpiringSignatures: true,
   requireSignerIntentBinding: true,
   maxSignatureTtlMs: 15_000,
   maxHumanApprovalMs: 300_000,
   maxGlobalCollateralContentionMs: 120_000,
+  minPreemptionAgeMs: 2_000,
+  nonPreemptableSigningMs: 5_000,
+  preemptionWindowMs: 30_000,
+  maxPreemptionsPerWindow: 1,
+  requirePreemptionCancellation: true,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
   requireAccountWideLock: true,
@@ -497,6 +528,12 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     }
     if (!params.ledger.capabilities?.priorityLocks) {
       ledgerReasons.push("PRIORITY_LOCK_REQUIRED");
+    }
+    if (
+      policy.requirePreemptionCancellation &&
+      !params.ledger.capabilities?.preemptionCancellation
+    ) {
+      ledgerReasons.push("PREEMPTION_CANCEL_REQUIRED");
     }
     if (
       policy.requireAccountWideLock &&
@@ -744,6 +781,30 @@ export function checkTrajectoryInvariants(params: {
     ) {
       reasons.add("CLOCK_DRIFT_LIMIT");
     }
+    if (policy.requireDurableTimeCalibration) {
+      if (
+        simulation.timeCalibrationSource !== "durable" ||
+        !simulation.timeCalibrationSyncedAt
+      ) {
+        reasons.add("TIME_CALIBRATION_REQUIRED");
+      }
+      if (
+        simulation.timeCalibrationSyncedAt &&
+        isOlderThanMs(
+          simulation.timeCalibrationSyncedAt,
+          policy.maxTimeCalibrationAgeMs,
+        )
+      ) {
+        reasons.add("TIME_CALIBRATION_STALE");
+      }
+      if (
+        simulation.timeCalibrationRoundTripMs !== undefined &&
+        simulation.timeCalibrationRoundTripMs >
+          policy.maxTimeCalibrationRoundTripMs
+      ) {
+        reasons.add("TIME_CALIBRATION_UNSAFE");
+      }
+    }
     for (const reason of simulation.venueReasonCodes ?? []) {
       reasons.add(reason);
     }
@@ -801,12 +862,26 @@ export function checkTrajectoryInvariants(params: {
       row.intentId !== current.intentId &&
       isActiveOrFinalDuplicate(row.status) &&
       isBlockingLock(row, policy) &&
-      !canEmergencyPreempt(current, row),
+      !canEmergencyPreempt(current, row, policy),
   );
   if (activeSameGlobalCollateralScope) {
     reasons.add("GLOBAL_COLLATERAL_LOCK_CONTENTION");
     reasons.add("GLOBAL_COLLATERAL_LOCK_REQUIRED");
     reasons.add("OVER_ALLOCATION_RISK");
+  }
+
+  for (const row of history) {
+    if (
+      current.globalCollateralLockScope !== undefined &&
+      row.globalCollateralLockScope === current.globalCollateralLockScope &&
+      row.intentId !== current.intentId &&
+      isActiveOrFinalDuplicate(row.status) &&
+      isBlockingLock(row, policy)
+    ) {
+      for (const reason of preemptionBlockReasons(current, row, policy)) {
+        reasons.add(reason);
+      }
+    }
   }
 
   const staleGlobalCollateralContention = history.some(
@@ -989,8 +1064,73 @@ function isEmergencyGasAction(intent: {
 function canEmergencyPreempt(
   current: ActionLedgerRow,
   prior: ActionLedgerRow,
+  policy: SafeloopPolicy,
 ): boolean {
-  return isEmergencyGasAction(current) && !isEmergencyGasAction(prior);
+  return preemptionBlockReasons(current, prior, policy).length === 0;
+}
+
+function preemptionBlockReasons(
+  current: ActionLedgerRow,
+  prior: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): AbortReason[] {
+  if (!isEmergencyGasAction(current) || isEmergencyGasAction(prior)) {
+    return ["GLOBAL_COLLATERAL_LOCK_CONTENTION"];
+  }
+
+  const reasons = new Set<AbortReason>();
+
+  if (
+    prior.status === "SIGNING" &&
+    !isOlderThanMs(prior.updatedAt, policy.nonPreemptableSigningMs)
+  ) {
+    reasons.add("NON_PREEMPTABLE_SIGNING_LOCK");
+    reasons.add("PREEMPTION_LIVELOCK_RISK");
+  }
+
+  const priorAgeAnchor = prior.createdAt ?? prior.updatedAt;
+  if (
+    priorAgeAnchor &&
+    !isOlderThanMs(priorAgeAnchor, policy.minPreemptionAgeMs)
+  ) {
+    reasons.add("PREEMPTION_LIVELOCK_RISK");
+  }
+
+  if (
+    (prior.preemptionCount ?? 0) >= policy.maxPreemptionsPerWindow &&
+    prior.lastPreemptedAt !== undefined &&
+    !isOlderThanMs(prior.lastPreemptedAt, policy.preemptionWindowMs)
+  ) {
+    reasons.add("PREEMPTION_LIVELOCK_RISK");
+  }
+
+  if (
+    policy.requirePreemptionCancellation &&
+    isLiveBroadcastRisk(prior.status) &&
+    !hasConfirmedPreemptionCancel(prior)
+  ) {
+    reasons.add("PREEMPTION_CANCEL_REQUIRED");
+    reasons.add("PREEMPTED_TX_STILL_LIVE");
+  }
+
+  return [...reasons];
+}
+
+function isLiveBroadcastRisk(status: LedgerStatus): boolean {
+  return [
+    "SIGNING",
+    "SIGNED",
+    "REQUEST_PENDING",
+    "REQUEST_WATCH_REQUIRED",
+    "AWAITING_HUMAN_APPROVAL",
+    "SUBMITTED",
+    "BROADCASTING",
+    "LANDED",
+  ].includes(status);
+}
+
+function hasConfirmedPreemptionCancel(row: ActionLedgerRow): boolean {
+  return row.preemptionCancelStatus === "confirmed";
 }
 
 function requiresHip3Dex(
@@ -1083,6 +1223,12 @@ function isStaleLedgerRow(row: ActionLedgerRow, maxAgeMs: number): boolean {
   const updatedMs = Date.parse(row.updatedAt);
   if (!Number.isFinite(updatedMs)) return true;
   return Date.now() - updatedMs > maxAgeMs;
+}
+
+function isOlderThanMs(iso: string, maxAgeMs: number): boolean {
+  const observedMs = Date.parse(iso);
+  if (!Number.isFinite(observedMs)) return true;
+  return Date.now() - observedMs > maxAgeMs;
 }
 
 function sharesAnyLockScope(

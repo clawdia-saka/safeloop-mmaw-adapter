@@ -61,6 +61,9 @@ It signs only when all checks pass:
 15. Oracle age uses monotonic timing and rejects unsafe clock drift.
 16. Emergency exits can preempt lower-priority collateral locks.
 17. Shared collateral pools must be explicit.
+18. Serverless cold starts must prove durable time calibration before oracle checks.
+19. Signing locks get a short non-preemptable window to avoid emergency livelock.
+20. A preempted live transaction must have cancellation proof before another transaction signs.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -122,6 +125,9 @@ It can reject:
 - local clock drift that would brick or bypass oracle freshness checks
 - priority inversion where a low-priority task blocks an emergency exit
 - collateral pool leakage from ambiguous default pool labels
+- cold-start workers that cannot prove durable time calibration
+- emergency preemption loops that keep aborting each other before broadcast
+- preempted transactions that may still be alive in a mempool or venue queue
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -180,6 +186,9 @@ Included:
 - monotonic oracle age and clock-drift limits
 - priority-aware global collateral locking
 - explicit collateral pool requirements
+- durable time calibration requirements for serverless workers
+- non-preemptable signing windows and preemption rate limits
+- preemption cancellation proof for live broadcast risk
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -228,7 +237,10 @@ That means:
 - partial fill unresolved: do not mark success
 - reverted gas missing: do not mark fully reconciled
 - unsafe local clock drift: do not sign
+- missing or stale durable time calibration: do not sign
 - missing shared collateral pool: do not sign
+- live preempted transaction without cancellation proof: do not sign
+- emergency preemption livelock risk: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 
