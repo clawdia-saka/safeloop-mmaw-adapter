@@ -62,6 +62,45 @@ export function buildMmArgs(intent: CanonicalIntent): string[] {
   }
 }
 
+export function buildWalletRequestsListArgs(sync = true): string[] {
+  return sync
+    ? ["wallet", "requests", "list", "--sync", "--json"]
+    : ["wallet", "requests", "list", "--no-sync", "--json"];
+}
+
+export function buildWalletRequestsWatchArgs(pollingId: string): string[] {
+  if (!pollingId) throw new Error("MISSING_POLLING_ID");
+  return ["wallet", "requests", "watch", "--polling-id", pollingId, "--json"];
+}
+
+export function buildTxHistoryArgs(params: {
+  addresses?: `0x${string}`[];
+  chains?: Array<number | `eip155:${number}`>;
+  type?: "in" | "out" | "self" | string;
+  limit?: number;
+} = {}): string[] {
+  const args = ["tx", "history", "--json"];
+
+  if (params.addresses?.length) {
+    args.push("--addresses", params.addresses.join(","));
+  }
+
+  if (params.chains?.length) {
+    args.push("--chain", params.chains.join(","));
+  }
+
+  appendOptional(args, "--type", params.type);
+
+  if (params.limit !== undefined) {
+    if (!Number.isInteger(params.limit) || params.limit < 1 || params.limit > 500) {
+      throw new Error("INVALID_TX_HISTORY_LIMIT");
+    }
+    args.push("--limit", String(params.limit));
+  }
+
+  return args;
+}
+
 function buildTransferArgs(intent: CanonicalIntent): string[] {
   requireFields(intent, ["assetOut", "amountIn", "targetContract"]);
 

@@ -88,6 +88,9 @@ Recommended invariants:
 - reject position size increases that exceed the user goal budget
 - reject bridge/deposit paths where gas and slippage exceed the target trade value
 - require ledger reconciliation before assuming a position exists
+- require `mm perps positions`, `orders`, or `balance` reconciliation before success
+- reject `spcx` when the intended target is `xyz:spcx`
+- reject testnet deposits when the USDC source is not the Hyperliquid-compatible token
 
 ## Operational Notes
 
@@ -96,4 +99,3 @@ Recommended invariants:
 - Prefer `mm perps positions`, `orders`, and `balance` after every signed perps action.
 - Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeout states as unresolved, not failed success.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.
-

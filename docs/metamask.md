@@ -54,6 +54,9 @@ Supported commands in the current prototype:
 - `mm perps close`
 - `mm perps modify`
 - `mm perps cancel`
+- `mm wallet requests list`
+- `mm wallet requests watch`
+- `mm tx history`
 
 The CLI adapter builds the `mm` command after intent canonicalization, but execution still passes through `failClosedSign`.
 
@@ -63,9 +66,24 @@ Current mapping:
 transfer -> mm transfer --token <assetOut> --amount <amountIn> --to <targetContract> --chain-id <chainId> --json
 swap     -> mm swap execute --from-token <assetIn> --to-token <assetOut> --amount <amountIn> --from-chain <chainId> --json
 perps    -> mm perps <open|close|modify|cancel> ... --dry-run --json
+watch    -> mm wallet requests watch --polling-id <id> --json
+history  -> mm tx history --json ...
 ```
 
 For Hyperliquid HIP-3 builder DEX markets, see `docs/hip3.md`.
+
+## Reconciliation Path
+
+Server-wallet and Guard flows can return request states before the transaction is final.
+
+Safeloop treats these as non-success:
+
+- `AWAITING_MFA`
+- `BROADCASTING`
+- `BROADCAST_TRACKING_EXPIRED`
+- timeout states
+
+Agents should use `mm wallet requests watch` and `mm tx history` to reconcile the request before updating memory or telling the user the action is complete.
 
 ## Why This Matters
 

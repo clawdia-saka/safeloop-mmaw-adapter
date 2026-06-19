@@ -25,6 +25,8 @@ Safeloop owns:
 - fail-closed signing decisions
 - reconciliation between chain state and agent memory
 - HIP-3 market identity tracking for perps flows
+- wallet request status interpretation for server-wallet and Guard/MFA flows
+- venue reconciliation for Hyperliquid positions, orders, and balances
 
 ## Runtime Flow
 
@@ -45,16 +47,37 @@ Agent proposes intent
 ## Ledger State Machine
 
 ```text
-PLANNED -> LOCKED -> SIMULATED -> APPROVED_FOR_SIGNING -> SIGNED -> SUBMITTED -> CONFIRMED
-                                      |                  |             |
-                                      v                  v             v
-                                   ABORTED           SIGN_FAILED    REVERTED/TIMED_OUT
+PLANNED -> LOCKED -> SIMULATED -> APPROVED_FOR_SIGNING -> SIGNED -> REQUEST_PENDING
+                                                             |            |
+                                                             v            v
+                                                        SIGN_FAILED   AWAITING_HUMAN_APPROVAL
+                                                                          |
+                                                                          v
+                                                                      SUBMITTED
+                                                                          |
+                                                                          v
+                                                                     BROADCASTING
+                                                                     /         \
+                                                                    v           v
+                                                                 LANDED      TIMED_OUT
+                                                                    |
+                                                                    v
+                                                           VENUE_RECONCILED
+                                                                    |
+                                                                    v
+                                                                CONFIRMED
+
+ABORTED and REVERTED are terminal failure states.
 ```
 
 Rules:
 
 - `ABORTED` means Safeloop stopped the action before signing.
 - `SIGN_FAILED` means signing was attempted but failed.
+- `AWAITING_HUMAN_APPROVAL` means Guard/MFA approval is still required.
+- `BROADCASTING` means the operation is not yet final and must not be counted as success.
+- `LANDED` means an on-chain transaction exists, but venue state may still need checking.
+- `VENUE_RECONCILED` means the venue state agrees with the intended action.
 - `REVERTED` means the operation reached chain execution and failed.
 - `TIMED_OUT` means submission did not settle within the policy window.
 - Agent memory must be updated from the ledger, not from the agent's assumption.
@@ -108,6 +131,26 @@ Reject if the same user goal has already failed too many times in a short window
 
 Reject or require review when a perps action references an unqualified builder DEX market. For example, an agent should not confuse `spcx` on the main market with `xyz:spcx` on a HIP-3 builder DEX.
 
+### Token Contract Required
+
+Reject ERC-20 transfers when the user or agent provides only a token symbol and the downstream CLI requires a token contract address.
+
+### Quote Only
+
+Reject success claims when a route was quoted but never executed.
+
+### Broadcast Tracking
+
+Treat `BROADCASTING`, `BROADCAST_TRACKING_EXPIRED`, and timeouts as unresolved or failed states. Do not mark the agent task complete from these statuses.
+
+### Position Reconciliation
+
+For perps actions, require a post-action position, order, or balance check before marking the action successful.
+
+### Fee To Trade Value
+
+Reject actions where estimated gas and slippage exceed the configured share of the trade value.
+
 ### NAV Guard
 
 Reject if simulated net asset value loss exceeds the configured basis-point limit.
@@ -141,5 +184,6 @@ Required integrations:
 - `Ledger`: lock, update, and query recent wallet actions.
 - `Simulator`: dry-run unsigned operations.
 - `MmawSigner`: build unsigned operations and sign approved operations.
+- `Reconciliation`: map wallet request, tx history, and venue observations back into ledger states.
 
 This keeps the core adapter portable across Notion, Supabase, local SQLite, Anvil, Tenderly, and different MetaMask Agent Wallet wiring.

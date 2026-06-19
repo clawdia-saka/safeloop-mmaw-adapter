@@ -25,6 +25,7 @@ Those checks are useful, but they do not answer:
 - Is the agent reversing its previous action for no useful reason?
 - Is the agent losing money through a loop?
 - Did the agent think a failed transaction succeeded?
+- Is a submitted wallet request still waiting for MFA, stuck broadcasting, or never reconciled with the venue?
 
 Safeloop handles that missing layer.
 
@@ -97,6 +98,8 @@ It can reject:
 - net asset value loss beyond policy
 - unbounded approvals without a matching downstream action
 - HIP-3 perps mistakes, such as opening on the wrong builder DEX market or retrying close/cancel loops
+- unresolved wallet request states, such as MFA wait, broadcast timeout, or quote-only execution
+- token identity mistakes, such as using `USDC` when the CLI requires a contract address
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -139,9 +142,11 @@ Included:
 - simulator interface
 - fail-closed signing gateway
 - default trajectory invariant checks
+- reconciliation helpers for wallet requests and perps venue state
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
+- MetaMask Agentic CLI helpers for `wallet requests watch` and `tx history`
 
 Not included yet:
 
@@ -156,6 +161,7 @@ Not included yet:
 ```text
 src/index.ts              Core adapter types and fail-closed signing flow
 src/metamask.ts           MetaMask Agentic SDK and mm CLI adapters
+src/reconciliation.ts     Wallet request and venue reconciliation helpers
 docs/architecture.md      Detailed architecture and policy model
 docs/metamask.md             MetaMask integration guide
 docs/hip3.md                 Hyperliquid HIP-3 perps use case
@@ -171,12 +177,15 @@ That means:
 - unknown check: do not sign
 - unavailable simulation: do not sign
 - ledger conflict: do not sign
+- unresolved broadcast or MFA state: do not mark success
+- unreconciled perps venue state: do not mark success
 
 ## Roadmap
 
-1. Add Supabase Action Ledger adapter.
-2. Add Anvil dry-run simulator adapter.
-3. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.
-4. Expand `mm` CLI wrapper beyond transfer, swap, and perps prototype commands.
-5. Add Slack and Notion notification hooks.
-6. Add policy file support with YAML.
+1. Add SQLite and Supabase Action Ledger adapters.
+2. Add `safeloop-mm` CLI wrapper so agents do not call `mm` directly.
+3. Add Anvil or Tenderly dry-run simulator adapter.
+4. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.
+5. Expand `mm` CLI wrapper beyond transfer, swap, and perps prototype commands.
+6. Add Slack and Notion notification hooks.
+7. Add policy file support with YAML.

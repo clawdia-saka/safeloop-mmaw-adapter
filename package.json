@@ -23,11 +23,16 @@
     "./hip3": {
       "types": "./dist/hip3.d.ts",
       "default": "./dist/hip3.js"
+    },
+    "./reconciliation": {
+      "types": "./dist/reconciliation.d.ts",
+      "default": "./dist/reconciliation.js"
     }
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
