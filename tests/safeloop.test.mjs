@@ -5,9 +5,14 @@ import {
   canonicalizeIntent,
   checkTrajectoryInvariants,
   defaultPolicy,
+  failClosedSign,
+  makeLockScope,
   qualifyHip3Symbol,
   reconcileVenueState,
   reconcileWalletRequest,
+  SafeloopAbort,
+  simulateHyperliquidPerpsRisk,
+  hyperliquidRiskToSimulation,
 } from "../dist/index.js";
 import {
   buildTxHistoryArgs,
@@ -42,6 +47,7 @@ test("rejects ambiguous HIP-3 symbol when dex is required", () => {
   });
 
   assert.ok(reasons.includes("HIP3_SYMBOL_AMBIGUOUS"));
+  assert.ok(reasons.includes("NON_EVM_SIMULATION_REQUIRED"));
 });
 
 test("rejects ERC-20 transfer when only token symbol is present", () => {
@@ -116,6 +122,97 @@ test("builds MetaMask request watch and tx history args", () => {
   ]);
 });
 
+test("requires a durable atomic ledger before signing", async () => {
+  const unsafeLedger = {
+    capabilities: { durable: false, atomicLocks: false },
+    tryLock: async () => true,
+    markStatus: async () => {},
+    recentForWallet: async () => [],
+  };
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: {
+          userGoalId: "durable-ledger",
+          wallet: "0x0000000000000000000000000000000000000001",
+          chainId: 1,
+          actionType: "swap",
+          assetIn: "eth",
+          assetOut: "usdc",
+          amountIn: "1",
+        },
+        ledger: unsafeLedger,
+        mmaw: {
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => ({}),
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("DURABLE_LEDGER_REQUIRED"),
+  );
+});
+
+test("detects active lock-scope overlap before reconciliation completes", () => {
+  const current = row({
+    actionType: "perps_open",
+    dex: "xyz",
+    symbol: "spcx",
+    side: "long",
+    size: "10",
+    leverage: "3",
+  });
+  current.lockScope = makeLockScope(current);
+
+  const prior = {
+    ...current,
+    intentId: "prior",
+    idempotencyKey: "prior-key",
+    status: "BROADCASTING",
+  };
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [prior],
+    simulation: {
+      ...baseSimulation,
+      venueSimulation: "hyperliquid-margin-model",
+      marginRatioBps: 20_000,
+      liquidationBufferBps: 1_000,
+    },
+    policy: defaultPolicy,
+  });
+
+  assert.ok(reasons.includes("OVER_ALLOCATION_RISK"));
+});
+
+test("flags unsafe Hyperliquid perps risk model output", () => {
+  const risk = simulateHyperliquidPerpsRisk({
+    input: {
+      accountEquityUsd: "100",
+      existingNotionalUsd: "0",
+      newOrderNotionalUsd: "1000",
+      leverage: "20",
+      markPrice: "100",
+      liquidationPrice: "99",
+      maxSlippageUsd: "2",
+      estimatedFeesUsd: "1",
+    },
+    minMarginRatioBps: 25_000,
+    minLiquidationBufferBps: 200,
+  });
+
+  const simulationPatch = hyperliquidRiskToSimulation(risk);
+  assert.ok(simulationPatch.venueReasonCodes.includes("MARGIN_RATIO_LIMIT"));
+  assert.ok(
+    simulationPatch.venueReasonCodes.includes("LIQUIDATION_PRICE_TOO_CLOSE"),
+  );
+});
+
 function row(overrides) {
   const canonical = canonicalizeIntent({
     userGoalId: "test-goal",
@@ -134,4 +231,3 @@ function row(overrides) {
     updatedAt: new Date(0).toISOString(),
   };
 }
-

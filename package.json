@@ -9,7 +9,8 @@
   "files": [
     "dist",
     "README.md",
-    "docs"
+    "docs",
+    "sql"
   ],
   "exports": {
     ".": {
@@ -27,6 +28,10 @@
     "./reconciliation": {
       "types": "./dist/reconciliation.d.ts",
       "default": "./dist/reconciliation.js"
+    },
+    "./hyperliquid": {
+      "types": "./dist/hyperliquid.d.ts",
+      "default": "./dist/hyperliquid.js"
     }
   },
   "scripts": {

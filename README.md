@@ -8,6 +8,7 @@ This repo now includes explicit MetaMask connection points:
 - `src/metamask.ts` includes an `mm` CLI adapter for MetaMask Agentic CLI.
 - The MetaMask integration guide shows how those adapters plug into Safeloop.
 - `docs/hip3.md` covers the current Hyperliquid HIP-3 perps workflow.
+- `docs/death-metrics.md` covers red-team failure scenarios and required guards.
 
 This project adds a runtime gate before an autonomous agent can sign a wallet action. It is designed to stop mistakes that normal wallet permissions do not catch, such as an agent repeatedly swapping `ETH -> USDC -> ETH` until the wallet loses funds to gas, slippage, or bad retries.
 
@@ -143,6 +144,8 @@ Included:
 - fail-closed signing gateway
 - default trajectory invariant checks
 - reconciliation helpers for wallet requests and perps venue state
+- durable-ledger and lock-scope checks to prevent reboot amnesia
+- Hyperliquid perps margin-model helpers for non-EVM simulation paths
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -162,9 +165,12 @@ Not included yet:
 src/index.ts              Core adapter types and fail-closed signing flow
 src/metamask.ts           MetaMask Agentic SDK and mm CLI adapters
 src/reconciliation.ts     Wallet request and venue reconciliation helpers
+src/hyperliquid.ts        Hyperliquid perps margin-model helpers
 docs/architecture.md      Detailed architecture and policy model
 docs/metamask.md             MetaMask integration guide
 docs/hip3.md                 Hyperliquid HIP-3 perps use case
+docs/death-metrics.md        Red-team failure scenarios
+sql/supabase.sql             Durable Action Ledger schema
 ```
 
 ## Safety Model
@@ -173,6 +179,7 @@ Safeloop defaults to fail-closed.
 
 That means:
 
+- non-durable ledger: do not sign
 - failed check: do not sign
 - unknown check: do not sign
 - unavailable simulation: do not sign
@@ -182,7 +189,7 @@ That means:
 
 ## Roadmap
 
-1. Add SQLite and Supabase Action Ledger adapters.
+1. Add SQLite and Supabase Action Ledger adapters around `sql/supabase.sql`.
 2. Add `safeloop-mm` CLI wrapper so agents do not call `mm` directly.
 3. Add Anvil or Tenderly dry-run simulator adapter.
 4. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.

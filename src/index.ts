@@ -5,6 +5,7 @@ import { canonicalizePerpsFields } from "./hip3.js";
 export * from "./metamask.js";
 export * from "./hip3.js";
 export * from "./reconciliation.js";
+export * from "./hyperliquid.js";
 
 export type ActionType =
   | "swap"
@@ -60,6 +61,13 @@ export type AbortReason =
   | "BROADCASTING_TIMEOUT"
   | "BROADCAST_TRACKING_EXPIRED"
   | "HUMAN_APPROVAL_REQUIRED"
+  | "DURABLE_LEDGER_REQUIRED"
+  | "INTENT_LOCK_REQUIRED"
+  | "STALE_RECONCILIATION"
+  | "NON_EVM_SIMULATION_REQUIRED"
+  | "MARGIN_RATIO_LIMIT"
+  | "LIQUIDATION_PRICE_TOO_CLOSE"
+  | "OVER_ALLOCATION_RISK"
   | "UNKNOWN_STATE";
 
 export type AgentIntent = {
@@ -114,6 +122,7 @@ export type ActionLedgerRow = CanonicalIntent & {
   quoteId?: string;
   pollingId?: string;
   txHash?: `0x${string}`;
+  lockScope?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -130,6 +139,11 @@ export type SimulationResult = {
   positionReconciled?: boolean;
   broadcastStatus?: "broadcasting" | "expired" | "landed" | "unknown";
   requiresHumanApproval?: boolean;
+  reconciledAt?: string;
+  venueSimulation?: "evm" | "hyperliquid-margin-model" | "hyperliquid-api" | "unknown";
+  marginRatioBps?: number;
+  liquidationBufferBps?: number;
+  venueReasonCodes?: AbortReason[];
   reason?: string;
 };
 
@@ -146,6 +160,10 @@ export type SafetyEnvelope<TUnsignedOperation = unknown> = {
 };
 
 export type Ledger = {
+  capabilities?: {
+    durable: boolean;
+    atomicLocks: boolean;
+  };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   markStatus(
     intentId: string,
@@ -181,6 +199,10 @@ export type SafeloopPolicy = {
   maxFeeToTradeValueBps: number;
   nativeTokenSymbols: string[];
   hip3SymbolsRequireDex: string[];
+  requireDurableLedger: boolean;
+  maxReconciliationAgeMs: number;
+  minMarginRatioBps: number;
+  minLiquidationBufferBps: number;
 };
 
 export const defaultPolicy: SafeloopPolicy = {
@@ -193,6 +215,10 @@ export const defaultPolicy: SafeloopPolicy = {
   maxFeeToTradeValueBps: 1_000,
   nativeTokenSymbols: ["ETH", "MATIC", "BNB", "AVAX"],
   hip3SymbolsRequireDex: ["SPCX"],
+  requireDurableLedger: true,
+  maxReconciliationAgeMs: 30_000,
+  minMarginRatioBps: 12_500,
+  minLiquidationBufferBps: 500,
 };
 
 export class SafeloopAbort extends Error {
@@ -278,6 +304,19 @@ export function makeIdempotencyKey(intent: CanonicalIntent): string {
   );
 }
 
+export function makeLockScope(intent: CanonicalIntent): string {
+  const market = intent.symbol ?? intent.assetOut ?? intent.assetIn ?? "wallet";
+  return [
+    intent.wallet,
+    intent.chainId,
+    intent.venue ?? "evm",
+    intent.dex ?? "main",
+    market,
+  ]
+    .join(":")
+    .toLowerCase();
+}
+
 export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   params: {
     intent: AgentIntent;
@@ -291,12 +330,22 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   const canonicalIntent = canonicalizeIntent(params.intent);
   const intentId = sha256(stableJson(canonicalIntent));
   const idempotencyKey = makeIdempotencyKey(canonicalIntent);
+  const lockScope = makeLockScope(canonicalIntent);
   const now = new Date().toISOString();
+
+  if (
+    policy.requireDurableLedger &&
+    (!params.ledger.capabilities?.durable ||
+      !params.ledger.capabilities?.atomicLocks)
+  ) {
+    throw new SafeloopAbort(["DURABLE_LEDGER_REQUIRED"]);
+  }
 
   const row: ActionLedgerRow = {
     ...canonicalIntent,
     intentId,
     idempotencyKey,
+    lockScope,
     status: "LOCKED",
     reasonCodes: [],
     quoteId: canonicalIntent.quoteId,
@@ -310,8 +359,9 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   if (!locked) {
     await params.ledger.markStatus(intentId, "ABORTED", [
       "LEDGER_LOCK_CONFLICT",
+      "INTENT_LOCK_REQUIRED",
     ]);
-    throw new SafeloopAbort(["LEDGER_LOCK_CONFLICT"]);
+    throw new SafeloopAbort(["LEDGER_LOCK_CONFLICT", "INTENT_LOCK_REQUIRED"]);
   }
 
   const unsignedOperation =
@@ -390,6 +440,33 @@ export function checkTrajectoryInvariants(params: {
   if (simulation.requiresHumanApproval) {
     reasons.add("HUMAN_APPROVAL_REQUIRED");
   }
+  if (simulation.reconciledAt && isStaleObservation(simulation.reconciledAt, policy)) {
+    reasons.add("STALE_RECONCILIATION");
+  }
+  if (current.actionType.startsWith("perps_")) {
+    if (
+      !simulation.venueSimulation ||
+      simulation.venueSimulation === "evm" ||
+      simulation.venueSimulation === "unknown"
+    ) {
+      reasons.add("NON_EVM_SIMULATION_REQUIRED");
+    }
+    if (
+      simulation.marginRatioBps !== undefined &&
+      simulation.marginRatioBps < policy.minMarginRatioBps
+    ) {
+      reasons.add("MARGIN_RATIO_LIMIT");
+    }
+    if (
+      simulation.liquidationBufferBps !== undefined &&
+      simulation.liquidationBufferBps < policy.minLiquidationBufferBps
+    ) {
+      reasons.add("LIQUIDATION_PRICE_TOO_CLOSE");
+    }
+    for (const reason of simulation.venueReasonCodes ?? []) {
+      reasons.add(reason);
+    }
+  }
 
   const activeDuplicate = history.some(
     (row) =>
@@ -411,6 +488,14 @@ export function checkTrajectoryInvariants(params: {
         isMeaningfulPriorAction(row.status),
     );
   if (reverseSwap) reasons.add("REVERSE_SWAP_LOOP");
+
+  const activeSameScope = history.some(
+    (row) =>
+      row.lockScope === current.lockScope &&
+      row.intentId !== current.intentId &&
+      isActiveOrFinalDuplicate(row.status),
+  );
+  if (activeSameScope) reasons.add("OVER_ALLOCATION_RISK");
 
   const attemptsForGoal = history.filter(
     (row) =>
@@ -504,6 +589,12 @@ function requiresHip3Dex(
 
 function isHexAddress(value: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
+function isStaleObservation(observedAt: string, policy: SafeloopPolicy): boolean {
+  const observedMs = Date.parse(observedAt);
+  if (!Number.isFinite(observedMs)) return true;
+  return Date.now() - observedMs > policy.maxReconciliationAgeMs;
 }
 
 function isActiveOrFinalDuplicate(status: LedgerStatus): boolean {

@@ -91,6 +91,8 @@ Recommended invariants:
 - require `mm perps positions`, `orders`, or `balance` reconciliation before success
 - reject `spcx` when the intended target is `xyz:spcx`
 - reject testnet deposits when the USDC source is not the Hyperliquid-compatible token
+- reject perps actions without a Hyperliquid-aware risk simulation
+- reject margin ratios and liquidation buffers below policy
 
 ## Operational Notes
 

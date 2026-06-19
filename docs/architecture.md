@@ -27,6 +27,8 @@ Safeloop owns:
 - HIP-3 market identity tracking for perps flows
 - wallet request status interpretation for server-wallet and Guard/MFA flows
 - venue reconciliation for Hyperliquid positions, orders, and balances
+- durable idempotency and lock-scope enforcement before signing
+- non-EVM risk simulation for Hyperliquid perps
 
 ## Runtime Flow
 
@@ -101,6 +103,21 @@ sha256(
 
 If the same key is already active or complete, Safeloop aborts before signing.
 
+## Durable Ledger Requirement
+
+Production execution must use durable storage with atomic uniqueness constraints.
+
+In-memory idempotency caches are acceptable only for local demos because a process crash can erase the cache and allow a duplicate transaction after restart.
+
+Required properties:
+
+- unique `idempotencyKey`
+- unique active `lockScope`
+- transactionally written before signing
+- retained across process restarts
+
+The Supabase/Postgres baseline is in `sql/supabase.sql`.
+
 ## Default Invariants
 
 ### Duplicate Intent
@@ -150,6 +167,10 @@ For perps actions, require a post-action position, order, or balance check befor
 ### Fee To Trade Value
 
 Reject actions where estimated gas and slippage exceed the configured share of the trade value.
+
+### Non-EVM Perps Simulation
+
+Reject HIP-3/perps actions when the only simulation result is EVM-based. Hyperliquid perps need either a venue API simulation or a local margin/liquidation risk model.
 
 ### NAV Guard
 
