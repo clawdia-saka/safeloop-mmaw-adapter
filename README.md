@@ -64,6 +64,7 @@ It signs only when all checks pass:
 18. Serverless cold starts must prove durable time calibration before oracle checks.
 19. Signing locks get a short non-preemptable window to avoid emergency livelock.
 20. A preempted live transaction must have cancellation proof before another transaction signs.
+21. Cancellation proof can use fresh multi-RPC broadcast acceptance to avoid RPC indexing deadlock.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -128,6 +129,7 @@ It can reject:
 - cold-start workers that cannot prove durable time calibration
 - emergency preemption loops that keep aborting each other before broadcast
 - preempted transactions that may still be alive in a mempool or venue queue
+- cancellation proof waits that would put RPC indexing lag on the emergency path
 
 ### Phase 3: Fail-Closed Signing Gateway
 
@@ -189,6 +191,7 @@ Included:
 - durable time calibration requirements for serverless workers
 - non-preemptable signing windows and preemption rate limits
 - preemption cancellation proof for live broadcast risk
+- multi-RPC cancellation acceptance as a bounded fallback for indexing lag
 - MetaMask Agentic SDK-style signer adapter
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
@@ -241,6 +244,7 @@ That means:
 - missing shared collateral pool: do not sign
 - live preempted transaction without cancellation proof: do not sign
 - emergency preemption livelock risk: do not sign
+- stale or under-quorum cancellation acceptance: do not sign
 - unresolved broadcast or MFA state: do not mark success
 - unreconciled perps venue state: do not mark success
 

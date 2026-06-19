@@ -712,3 +712,38 @@ Implementation hook:
 - `Ledger.capabilities.preemptionCancellation`
 - `PREEMPTION_CANCEL_REQUIRED`
 - `PREEMPTED_TX_STILL_LIVE`
+
+## DM-29: RPC Indexing Lag Deadlock on Cancellation Proof
+
+Severity: High
+
+Scenario:
+
+```text
+emergency action preempts a live lower-priority action
+replacement cancel transaction is broadcast
+RPC indexer lags behind the chain or mempool
+cancel proof query returns pending or not found
+emergency close waits for confirmation
+position reaches liquidation before the proof appears
+```
+
+Required guard:
+
+- Cancellation proof cannot depend on one RPC indexer becoming consistent.
+- A fresh replacement-broadcast acceptance from enough independent RPC paths can
+  satisfy the emergency gate while final indexing catches up.
+- The fallback must be bounded by age and quorum.
+- Stale or under-quorum acceptance still fails closed.
+
+Implementation hook:
+
+- `ActionLedgerRow.preemptionCancelStatus`
+- `ActionLedgerRow.preemptionCancelSubmittedAt`
+- `ActionLedgerRow.preemptionCancelObservedAt`
+- `ActionLedgerRow.preemptionCancelRpcQuorum`
+- `SafeloopPolicy.maxPreemptionCancelProofWaitMs`
+- `SafeloopPolicy.maxPreemptionCancelAcceptanceAgeMs`
+- `SafeloopPolicy.minPreemptionCancelRpcQuorum`
+- `PREEMPTION_CANCEL_QUORUM_REQUIRED`
+- `CANCELLATION_PROOF_INDEXING_LAG`

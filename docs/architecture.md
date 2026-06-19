@@ -45,6 +45,7 @@ Safeloop owns:
 - cold-start-safe durable time calibration
 - preemption livelock controls
 - cancellation proof for preempted live transactions
+- bounded cancellation acceptance for RPC indexing lag
 
 ## Runtime Flow
 
@@ -286,10 +287,14 @@ Preemption is deliberately narrow:
 - very new locks cannot be preempted immediately after creation
 - a prior signed, submitted, MFA-waiting, or broadcasting action needs
   cancellation proof before the emergency task can proceed
+- a fresh multi-RPC broadcast acceptance can satisfy the cancellation gate while
+  waiting for slower RPC indexes to expose the mined replacement transaction
 
 This prevents emergency tasks from repeatedly killing each other before any
 transaction reaches the venue. It also prevents Safeloop from treating a
 preempted database row as dead while the physical transaction may still land.
+The fallback is bounded by age and quorum so a single lagging or lying endpoint
+does not become the source of truth.
 
 ### Collateral Pool Identity
 

@@ -23,6 +23,9 @@ create table if not exists safeloop_action_ledger (
   last_preempted_at timestamptz,
   preemption_cancel_status text not null default 'not_required',
   preemption_cancel_tx_hash text,
+  preemption_cancel_submitted_at timestamptz,
+  preemption_cancel_observed_at timestamptz,
+  preemption_cancel_rpc_quorum integer,
   time_calibration_source text,
   time_calibration_synced_at timestamptz,
   time_calibration_round_trip_ms integer,
@@ -277,14 +280,20 @@ $$;
 create or replace function safeloop_mark_preemption_cancel(
   p_intent_id text,
   p_cancel_status text,
-  p_cancel_tx_hash text default null
+  p_cancel_tx_hash text default null,
+  p_submitted_at timestamptz default null,
+  p_observed_at timestamptz default null,
+  p_rpc_quorum integer default null
 )
 returns void
 language sql
 as $$
   update safeloop_action_ledger
   set preemption_cancel_status = p_cancel_status,
-      preemption_cancel_tx_hash = p_cancel_tx_hash
+      preemption_cancel_tx_hash = p_cancel_tx_hash,
+      preemption_cancel_submitted_at = p_submitted_at,
+      preemption_cancel_observed_at = p_observed_at,
+      preemption_cancel_rpc_quorum = p_rpc_quorum
   where intent_id = p_intent_id;
 $$;
 

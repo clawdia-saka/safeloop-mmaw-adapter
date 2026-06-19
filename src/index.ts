@@ -102,6 +102,8 @@ export type AbortReason =
   | "NON_PREEMPTABLE_SIGNING_LOCK"
   | "PREEMPTION_LIVELOCK_RISK"
   | "PREEMPTION_CANCEL_REQUIRED"
+  | "PREEMPTION_CANCEL_QUORUM_REQUIRED"
+  | "CANCELLATION_PROOF_INDEXING_LAG"
   | "PREEMPTED_TX_STILL_LIVE"
   | "UNKNOWN_STATE";
 
@@ -168,8 +170,16 @@ export type ActionLedgerRow = CanonicalIntent & {
   signatureExpiresAt?: string;
   preemptionCount?: number;
   lastPreemptedAt?: string;
-  preemptionCancelStatus?: "not_required" | "required" | "submitted" | "confirmed";
+  preemptionCancelStatus?:
+    | "not_required"
+    | "required"
+    | "submitted"
+    | "broadcast_accepted"
+    | "confirmed";
   preemptionCancelTxHash?: `0x${string}`;
+  preemptionCancelSubmittedAt?: string;
+  preemptionCancelObservedAt?: string;
+  preemptionCancelRpcQuorum?: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -301,6 +311,9 @@ export type SafeloopPolicy = {
   preemptionWindowMs: number;
   maxPreemptionsPerWindow: number;
   requirePreemptionCancellation: boolean;
+  maxPreemptionCancelProofWaitMs: number;
+  maxPreemptionCancelAcceptanceAgeMs: number;
+  minPreemptionCancelRpcQuorum: number;
   minMarginRatioBps: number;
   minLiquidationBufferBps: number;
   requireAccountWideLock: boolean;
@@ -344,6 +357,9 @@ export const defaultPolicy: SafeloopPolicy = {
   preemptionWindowMs: 30_000,
   maxPreemptionsPerWindow: 1,
   requirePreemptionCancellation: true,
+  maxPreemptionCancelProofWaitMs: 1_500,
+  maxPreemptionCancelAcceptanceAgeMs: 5_000,
+  minPreemptionCancelRpcQuorum: 2,
   minMarginRatioBps: 12_500,
   minLiquidationBufferBps: 500,
   requireAccountWideLock: true,
@@ -1107,10 +1123,16 @@ function preemptionBlockReasons(
   if (
     policy.requirePreemptionCancellation &&
     isLiveBroadcastRisk(prior.status) &&
-    !hasConfirmedPreemptionCancel(prior)
+    !hasUsablePreemptionCancel(prior, policy)
   ) {
     reasons.add("PREEMPTION_CANCEL_REQUIRED");
     reasons.add("PREEMPTED_TX_STILL_LIVE");
+    if (hasTimedOutCancelProofWait(prior, policy)) {
+      reasons.add("CANCELLATION_PROOF_INDEXING_LAG");
+    }
+    if (prior.preemptionCancelStatus === "broadcast_accepted") {
+      reasons.add("PREEMPTION_CANCEL_QUORUM_REQUIRED");
+    }
   }
 
   return [...reasons];
@@ -1129,8 +1151,37 @@ function isLiveBroadcastRisk(status: LedgerStatus): boolean {
   ].includes(status);
 }
 
-function hasConfirmedPreemptionCancel(row: ActionLedgerRow): boolean {
-  return row.preemptionCancelStatus === "confirmed";
+function hasUsablePreemptionCancel(
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  if (row.preemptionCancelStatus === "confirmed") return true;
+  if (row.preemptionCancelStatus !== "broadcast_accepted") return false;
+  if ((row.preemptionCancelRpcQuorum ?? 0) < policy.minPreemptionCancelRpcQuorum) {
+    return false;
+  }
+  if (!row.preemptionCancelObservedAt) return false;
+  return !isOlderThanMs(
+    row.preemptionCancelObservedAt,
+    policy.maxPreemptionCancelAcceptanceAgeMs,
+  );
+}
+
+function hasTimedOutCancelProofWait(
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): boolean {
+  if (
+    row.preemptionCancelStatus !== "submitted" &&
+    row.preemptionCancelStatus !== "broadcast_accepted"
+  ) {
+    return false;
+  }
+  if (!row.preemptionCancelSubmittedAt) return false;
+  return isOlderThanMs(
+    row.preemptionCancelSubmittedAt,
+    policy.maxPreemptionCancelProofWaitMs,
+  );
 }
 
 function requiresHip3Dex(

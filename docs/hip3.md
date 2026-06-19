@@ -109,6 +109,7 @@ Recommended invariants:
 - require durable time calibration for cold-start worker oracle checks
 - block emergency preemption livelock during signing windows
 - require cancellation proof before preempting a live signed or broadcasting action
+- accept fresh multi-RPC cancellation broadcast quorum when RPC indexing lags
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -130,6 +131,7 @@ Recommended invariants:
 - Do not rely on process-local monotonic timers alone after serverless cold start.
 - Tag emergency close/cancel intents with emergency priority.
 - Treat preempted signed or broadcasting requests as live until cancellation or nonce/fill reconciliation proves otherwise.
+- Do not put one RPC indexer's confirmation lag on the critical path for emergency exits.
 - Avoid implicit default collateral pools in production policies.
 - Reconcile partial closes by expected vs observed size, not by `positionFound`.
 - On testnet, verify the exact USDC source expected by the Hyperliquid environment before deposit.
