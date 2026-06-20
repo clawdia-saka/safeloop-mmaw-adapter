@@ -394,6 +394,38 @@ as $$
   where intent_id = p_intent_id;
 $$;
 
+create or replace function safeloop_mark_post_sign_assertion_failure(
+  p_intent_id text,
+  p_cleanup_ok boolean default true
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_reason_codes text[];
+begin
+  v_reason_codes := array['SIGNED_OPERATION_INTENT_MISMATCH'];
+
+  if not p_cleanup_ok then
+    v_reason_codes := array_append(
+      v_reason_codes,
+      'POST_SIGN_CLEANUP_REQUIRED'
+    );
+  end if;
+
+  update safeloop_action_ledger
+  set status = 'SIGN_FAILED',
+      reason_codes = v_reason_codes,
+      gas_reservation_status = 'released',
+      gas_reserved_usd = null,
+      gas_reservation_updated_at = now()
+  where intent_id = p_intent_id;
+
+  delete from safeloop_action_locks
+  where intent_id = p_intent_id;
+end;
+$$;
+
 create or replace function safeloop_release_terminal_lock()
 returns trigger
 language plpgsql

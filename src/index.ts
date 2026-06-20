@@ -6,6 +6,7 @@ export * from "./metamask.js";
 export * from "./hip3.js";
 export * from "./reconciliation.js";
 export * from "./hyperliquid.js";
+export * from "./evidence.js";
 
 export type ActionType =
   | "swap"
@@ -56,6 +57,7 @@ export type AbortReason =
   | "TOKEN_SYMBOL_AMBIGUOUS"
   | "HIP3_SYMBOL_AMBIGUOUS"
   | "TESTNET_USDC_MISMATCH"
+  | "UNSUPPORTED_CHAIN"
   | "QUOTE_ONLY_NOT_EXECUTED"
   | "POSITION_NOT_RECONCILED"
   | "POSITION_DELTA_MISMATCH"
@@ -80,6 +82,9 @@ export type AbortReason =
   | "SIGNATURE_EXPIRY_REQUIRED"
   | "SIGNATURE_EXPIRED"
   | "SIGNER_INTENT_BINDING_REQUIRED"
+  | "SIGNED_OPERATION_ASSERTION_REQUIRED"
+  | "SIGNED_OPERATION_INTENT_MISMATCH"
+  | "POST_SIGN_CLEANUP_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
   | "CLOCK_DRIFT_LIMIT"
@@ -288,6 +293,11 @@ export type Ledger = {
     status: LedgerStatus,
     reasonCodes?: AbortReason[],
   ): Promise<void>;
+  cleanupPostSignFailure?(params: {
+    row: ActionLedgerRow;
+    reasonCodes: AbortReason[];
+    signedOperation: unknown;
+  }): Promise<{ ok: boolean; reasonCodes?: AbortReason[] } | void>;
   recentForWallet(params: {
     wallet: string;
     chainId?: number;
@@ -301,6 +311,11 @@ export type MmawSigner<TUnsignedOperation, TSignedOperation> = {
   };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
+  assertSignedOperationMatchesIntent?(params: {
+    intent: CanonicalIntent;
+    unsignedOperation: TUnsignedOperation;
+    signedOperation: TSignedOperation;
+  }): Promise<boolean> | boolean;
 };
 
 export type Simulator<TUnsignedOperation> = {
@@ -319,6 +334,7 @@ export type SafeloopPolicy = {
   maxLossBps: number;
   maxFeeToTradeValueBps: number;
   nativeTokenSymbols: string[];
+  supportedChainIds: number[];
   hip3SymbolsRequireDex: string[];
   requireDurableLedger: boolean;
   maxReconciliationAgeMs: number;
@@ -333,6 +349,7 @@ export type SafeloopPolicy = {
   maxTimeCalibrationRoundTripMs: number;
   requireExpiringSignatures: boolean;
   requireSignerIntentBinding: boolean;
+  requirePostSignIntentAssertion: boolean;
   maxSignatureTtlMs: number;
   maxHumanApprovalMs: number;
   maxGlobalCollateralContentionMs: number;
@@ -373,6 +390,7 @@ export const defaultPolicy: SafeloopPolicy = {
   maxLossBps: 50,
   maxFeeToTradeValueBps: 1_000,
   nativeTokenSymbols: ["ETH", "MATIC", "BNB", "AVAX"],
+  supportedChainIds: [],
   hip3SymbolsRequireDex: ["SPCX"],
   requireDurableLedger: true,
   maxReconciliationAgeMs: 30_000,
@@ -387,6 +405,7 @@ export const defaultPolicy: SafeloopPolicy = {
   maxTimeCalibrationRoundTripMs: 250,
   requireExpiringSignatures: true,
   requireSignerIntentBinding: true,
+  requirePostSignIntentAssertion: true,
   maxSignatureTtlMs: 15_000,
   maxHumanApprovalMs: 300_000,
   maxGlobalCollateralContentionMs: 120_000,
@@ -570,67 +589,77 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     makeGlobalCollateralLockScope(canonicalIntent);
   const now = new Date().toISOString();
 
+  const preflightReasons: AbortReason[] = [];
+  if (!isSupportedChain(canonicalIntent.chainId, policy)) {
+    preflightReasons.push("UNSUPPORTED_CHAIN");
+  }
+  if (
+    policy.requirePostSignIntentAssertion &&
+    !params.mmaw.assertSignedOperationMatchesIntent
+  ) {
+    preflightReasons.push("SIGNED_OPERATION_ASSERTION_REQUIRED");
+  }
+
   if (policy.requireDurableLedger) {
-    const ledgerReasons: AbortReason[] = [];
     if (!params.ledger.capabilities?.durable) {
-      ledgerReasons.push("DURABLE_LEDGER_REQUIRED");
+      preflightReasons.push("DURABLE_LEDGER_REQUIRED");
     }
     if (!params.ledger.capabilities?.atomicLocks) {
-      ledgerReasons.push("ATOMIC_LOCK_REQUIRED");
+      preflightReasons.push("ATOMIC_LOCK_REQUIRED");
     }
     if (!params.ledger.capabilities?.lockLeases) {
-      ledgerReasons.push("LOCK_LEASE_REQUIRED");
+      preflightReasons.push("LOCK_LEASE_REQUIRED");
     }
     if (!params.ledger.capabilities?.ownedLocks || !params.ledger.verifyLock) {
-      ledgerReasons.push("LOCK_OWNERSHIP_REQUIRED");
+      preflightReasons.push("LOCK_OWNERSHIP_REQUIRED");
     }
     if (!params.ledger.capabilities?.lockLeaseRenewal) {
-      ledgerReasons.push("LOCK_LEASE_EXTENSION_REQUIRED");
+      preflightReasons.push("LOCK_LEASE_EXTENSION_REQUIRED");
     }
     if (!params.ledger.capabilities?.inFlightGasAccounting) {
-      ledgerReasons.push("IN_FLIGHT_GAS_RESERVED");
+      preflightReasons.push("IN_FLIGHT_GAS_RESERVED");
     }
     if (!params.ledger.capabilities?.priorityLocks) {
-      ledgerReasons.push("PRIORITY_LOCK_REQUIRED");
+      preflightReasons.push("PRIORITY_LOCK_REQUIRED");
     }
     if (
       policy.requirePreemptionCancellation &&
       !params.ledger.capabilities?.preemptionCancellation
     ) {
-      ledgerReasons.push("PREEMPTION_CANCEL_REQUIRED");
+      preflightReasons.push("PREEMPTION_CANCEL_REQUIRED");
     }
     if (policy.requireLockFencing && !params.ledger.capabilities?.lockFencing) {
-      ledgerReasons.push("LOCK_FENCING_REQUIRED");
+      preflightReasons.push("LOCK_FENCING_REQUIRED");
     }
     if (
       policy.requireAccountWideLock &&
       canonicalIntent.actionType.startsWith("perps_") &&
       !params.ledger.capabilities?.accountScopedLocks
     ) {
-      ledgerReasons.push("ACCOUNT_LOCK_REQUIRED");
+      preflightReasons.push("ACCOUNT_LOCK_REQUIRED");
     }
     if (
       policy.requireGlobalCollateralLock &&
       usesSharedCollateral(canonicalIntent) &&
       !params.ledger.capabilities?.globalCollateralLocks
     ) {
-      ledgerReasons.push("GLOBAL_COLLATERAL_LOCK_REQUIRED");
+      preflightReasons.push("GLOBAL_COLLATERAL_LOCK_REQUIRED");
     }
     if (
       policy.requireExplicitCollateralPool &&
       usesSharedCollateral(canonicalIntent) &&
       !canonicalIntent.collateralPoolId
     ) {
-      ledgerReasons.push("COLLATERAL_POOL_REQUIRED");
+      preflightReasons.push("COLLATERAL_POOL_REQUIRED");
     }
     if (
       policy.requireSignerIntentBinding &&
       !params.mmaw.capabilities?.intentBoundSignatures
     ) {
-      ledgerReasons.push("SIGNER_INTENT_BINDING_REQUIRED");
+      preflightReasons.push("SIGNER_INTENT_BINDING_REQUIRED");
     }
-    if (ledgerReasons.length > 0) throw new SafeloopAbort(ledgerReasons);
   }
+  if (preflightReasons.length > 0) throw new SafeloopAbort(preflightReasons);
 
   const row: ActionLedgerRow = {
     ...canonicalIntent,
@@ -714,12 +743,61 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
 
   try {
     const signed = await params.mmaw.sign(unsignedOperation);
+    if (policy.requirePostSignIntentAssertion) {
+      const matchesIntent =
+        await params.mmaw.assertSignedOperationMatchesIntent?.({
+          intent: canonicalIntent,
+          unsignedOperation,
+          signedOperation: signed,
+        });
+      if (!matchesIntent) {
+        const reasonCodes = await cleanupAfterPostSignMismatch({
+          ledger: params.ledger,
+          row,
+          signedOperation: signed,
+        });
+        throw new SafeloopAbort(reasonCodes);
+      }
+    }
     await params.ledger.markStatus(intentId, "SIGNED");
     return signed;
   } catch (error) {
+    if (
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("SIGNED_OPERATION_INTENT_MISMATCH")
+    ) {
+      throw error;
+    }
     await params.ledger.markStatus(intentId, "SIGN_FAILED", ["UNKNOWN_STATE"]);
     throw error;
   }
+}
+
+async function cleanupAfterPostSignMismatch(params: {
+  ledger: Ledger;
+  row: ActionLedgerRow;
+  signedOperation: unknown;
+}): Promise<AbortReason[]> {
+  const reasonCodes: AbortReason[] = ["SIGNED_OPERATION_INTENT_MISMATCH"];
+
+  try {
+    const cleanupResult = await params.ledger.cleanupPostSignFailure?.({
+      row: params.row,
+      signedOperation: params.signedOperation,
+      reasonCodes,
+    });
+    if (cleanupResult && !cleanupResult.ok) {
+      reasonCodes.push("POST_SIGN_CLEANUP_REQUIRED");
+      for (const reason of cleanupResult.reasonCodes ?? []) {
+        reasonCodes.push(reason);
+      }
+    }
+  } catch {
+    reasonCodes.push("POST_SIGN_CLEANUP_REQUIRED");
+  }
+
+  await params.ledger.markStatus(params.row.intentId, "SIGN_FAILED", reasonCodes);
+  return [...new Set(reasonCodes)];
 }
 
 async function verifyActiveLockOwnership(ledger: Ledger, row: ActionLedgerRow) {
@@ -1112,6 +1190,10 @@ function requiresTokenContract(
   if (isHexAddress(token)) return false;
   if (policy.nativeTokenSymbols.includes(token.toUpperCase())) return false;
   return !intent.tokenContract;
+}
+
+function isSupportedChain(chainId: number, policy: SafeloopPolicy): boolean {
+  return policy.supportedChainIds.includes(chainId);
 }
 
 function usesAmbiguousTokenSymbol(

@@ -19,6 +19,7 @@ MetaMask Agent Wallet owns:
 Safeloop owns:
 
 - canonical intent creation
+- chain allowlist enforcement
 - idempotency locking
 - action history checks
 - dry-run simulation gating
@@ -39,6 +40,8 @@ Safeloop owns:
 - in-flight gas reservation and reverted gas accounting
 - partial fill reconciliation
 - signer-bound intent checks to resist storage rollback replay
+- post-sign operation assertion before accepting signed payloads
+- evidence packet sanitization for operator logs
 - monotonic oracle-age checks and clock-drift limits
 - priority-aware lock handling for emergency exits
 - explicit collateral pool identity
@@ -144,6 +147,8 @@ Required properties:
 - preemption cancellation tracking for live transaction risk
 - transactionally written before signing
 - retained across process restarts
+- able to release nonce, gas, lock, and fencing resources after post-sign
+  assertion failure
 
 The Supabase/Postgres baseline is in `sql/supabase.sql`.
 
@@ -212,6 +217,30 @@ the result as replayable and refuses to sign.
 The signer integration must support intent-bound signatures. Storage state alone
 is not enough because a storage rollback after signature creation can let the
 same intent sign again after restart.
+
+The signer integration must also support post-sign assertion. The signed
+operation is compared against the canonical intent that passed simulation and
+trajectory checks. If the assertion fails, Safeloop fails closed, marks signing
+as failed, and invokes ledger cleanup for reserved nonce, gas, lock lease, and
+fencing resources. Cleanup failure is recorded as a separate reason so the next
+valid intent does not silently inherit stale reservations.
+
+`sign()` integrations are expected to return a signed payload without
+broadcasting it. A signer that signs and broadcasts in one step cannot provide a
+safe post-sign assertion boundary.
+
+### Chain Allowlist
+
+Production policy must explicitly list supported `chainId` values. Missing or
+empty allowlists block all chains. This prevents unsupported networks from
+falling through operation-type checks and reaching the signer.
+
+### Evidence Sanitization
+
+Evidence packets and operator logs should pass through `sanitizeEvidencePacket`
+before display or storage. The sanitizer redacts wallet addresses, transaction
+hashes, RPC URLs, nonce fields, authorization headers, API keys, and token-like
+strings. Raw debug data should stay local and out of public artifacts.
 
 ### Position Reconciliation
 

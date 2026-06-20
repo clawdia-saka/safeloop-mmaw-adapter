@@ -14,6 +14,8 @@ It is aimed at failures that normal wallet permission rules do not catch:
 - a partial fill being treated as success
 - a signed or broadcasting transaction being forgotten after a crash
 - an emergency close being blocked by stale locks, RPC lag, or gas depletion
+- a signed operation no longer matching the intent that passed safety checks
+- evidence logs leaking wallet addresses, RPC URLs, nonces, or token-like values
 
 This repo includes explicit MetaMask connection points:
 
@@ -62,6 +64,8 @@ Safeloop is designed around four simple guarantees:
 3. Do not treat pending, partial, reverted, or unknown state as success.
 4. Do not let emergency exits depend on a single stale worker, lock, RPC, or gas
    assumption.
+5. Do not sign on a chain unless that chain is explicitly allowlisted.
+6. Do not trust a signed payload unless it still matches the approved intent.
 
 For cancellation and preemption, Safeloop is intentionally strict:
 
@@ -71,6 +75,13 @@ For cancellation and preemption, Safeloop is intentionally strict:
 - RPC quorum partition does not unlock new risk
 - only reduce-only or close-all emergency closes can use the narrow partition
   escape path
+
+For logs and evidence packets, Safeloop redacts sensitive fields by default:
+
+- wallet addresses and transaction hashes
+- RPC URLs and endpoint fields
+- nonce values and nonce-domain fields
+- authorization headers, API keys, and token-like strings
 
 ## What It Does
 
@@ -90,25 +101,27 @@ It signs only when all checks pass:
 2. A deterministic idempotency key is created.
 3. A dry-run simulation passes.
 4. Recent wallet activity does not violate trajectory rules.
-5. The ledger state is consistent.
-6. Any wallet or market lock has an expiry lease.
-7. Any perps oracle price used for simulation is fresh enough.
-8. The signer still owns the lock immediately before signing.
-9. Perps risk is checked at the account level, not only per market.
-10. Signed payloads expire quickly enough to prevent ghost replay.
-11. Shared collateral is locked across venues.
-12. Native gas runway is preserved for emergency exits.
-13. In-flight signatures and reverted gas are counted before new opens.
-14. Partial fills stay pending until fully reconciled.
-15. Oracle age uses monotonic timing and rejects unsafe clock drift.
-16. Emergency exits can preempt lower-priority collateral locks.
-17. Shared collateral pools must be explicit.
-18. Serverless cold starts must prove durable time calibration before oracle checks.
-19. Signing locks get a short non-preemptable window to avoid emergency livelock.
-20. A preempted live transaction must have cancellation proof before another transaction signs.
-21. Cancellation proof must be ordered or confirmed; mempool quorum is telemetry, not proof.
-22. Reduce-only emergency closes can bypass RPC quorum partition without treating cancellation as proven.
-23. Nonce domains, lock fencing, gas reservations, partial fills, and guard composition are checked for cross-guard failure.
+5. The target chain is explicitly allowlisted.
+6. The ledger state is consistent.
+7. Any wallet or market lock has an expiry lease.
+8. Any perps oracle price used for simulation is fresh enough.
+9. The signer still owns the lock immediately before signing.
+10. Perps risk is checked at the account level, not only per market.
+11. Signed payloads expire quickly enough to prevent ghost replay.
+12. Signed payloads are asserted against the approved canonical intent.
+13. Shared collateral is locked across venues.
+14. Native gas runway is preserved for emergency exits.
+15. In-flight signatures and reverted gas are counted before new opens.
+16. Partial fills stay pending until fully reconciled.
+17. Oracle age uses monotonic timing and rejects unsafe clock drift.
+18. Emergency exits can preempt lower-priority collateral locks.
+19. Shared collateral pools must be explicit.
+20. Serverless cold starts must prove durable time calibration before oracle checks.
+21. Signing locks get a short non-preemptable window to avoid emergency livelock.
+22. A preempted live transaction must have cancellation proof before another transaction signs.
+23. Cancellation proof must be ordered or confirmed; mempool quorum is telemetry, not proof.
+24. Reduce-only emergency closes can bypass RPC quorum partition without treating cancellation as proven.
+25. Nonce domains, lock fencing, gas reservations, partial fills, and guard composition are checked for cross-guard failure.
 
 If any check fails, Safeloop aborts before signing.
 
@@ -177,6 +190,9 @@ It can reject:
 - stale or false-positive cancellation proofs
 - mempool quorum illusions where accepted cancellation is not ordered execution
 - RPC quorum partitions that would freeze non-reducing emergency work
+- unsupported chains when the allowlist is missing or empty
+- signed operation payloads that differ from the approved intent
+- unsanitized evidence packets that would leak operator-sensitive data
 - shared nonce collisions across workers
 - low-priority floods that starve emergency exits
 - split-brain lock release after worker restart
@@ -224,6 +240,11 @@ Production integrations provide three pieces:
 
 Safeloop calls them in order. If any result is failed or unknown, signing stops.
 
+The signer must be non-broadcasting at `sign()` time. If post-sign assertion
+fails, Safeloop marks the action failed and asks the ledger to release or
+invalidate reserved nonce, gas, lock, and fencing resources before the next
+intent can proceed.
+
 ## Current Status
 
 Prototype.
@@ -239,6 +260,7 @@ Included:
 - simulator interface
 - fail-closed signing gateway
 - default trajectory invariant checks
+- explicit chain allowlist checks with block-all default
 - reconciliation helpers for wallet requests and perps venue state
 - durable-ledger and lock-scope checks to prevent reboot amnesia
 - atomic distributed lock requirements with TTL-based lock leases
@@ -260,6 +282,8 @@ Included:
 - preemption cancellation proof for live broadcast risk
 - ordered cancellation proof requirements for live preemption
 - reduce-only emergency bypass for RPC quorum partition
+- post-sign signed-operation assertion with cleanup hook
+- sanitized evidence packets for operator logs
 - nonce-domain and lock-fencing guards for concurrent workers
 - gas reservation drift and partial reconciliation loop checks
 - guard-composition conflict detection for emergency flows
@@ -301,10 +325,15 @@ That means:
 - unknown check: do not sign
 - unavailable simulation: do not sign
 - ledger conflict: do not sign
+- missing or empty chain allowlist: do not sign
+- unsupported chain: do not sign
 - missing lock lease: do not sign
 - lost lock ownership: do not sign
 - unresolved prior signing transition: do not sign
 - missing or long-lived signature expiry: do not sign
+- missing post-sign assertion support: do not sign
+- signed operation differs from approved intent: fail and clean up resources
+- post-sign cleanup cannot be proven: mark cleanup required
 - unsafe account-wide perps health: do not sign
 - stale oracle price: do not sign
 - unsafe gas runway: do not sign new opens

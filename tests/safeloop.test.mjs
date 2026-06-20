@@ -13,6 +13,7 @@ import {
   reconcileVenueState,
   reconcileWalletRequest,
   SafeloopAbort,
+  sanitizeEvidencePacket,
   simulateHyperliquidPerpsRisk,
   hyperliquidRiskToSimulation,
 } from "../dist/index.js";
@@ -33,6 +34,50 @@ const baseSimulation = {
   timeCalibrationSyncedAt: new Date().toISOString(),
   timeCalibrationRoundTripMs: 20,
 };
+
+const fullLedgerCapabilities = {
+  durable: true,
+  atomicLocks: true,
+  lockLeases: true,
+  ownedLocks: true,
+  accountScopedLocks: true,
+  globalCollateralLocks: true,
+  lockLeaseRenewal: true,
+  inFlightGasAccounting: true,
+  priorityLocks: true,
+  preemptionCancellation: true,
+  lockFencing: true,
+};
+
+function makeSigningLedger(overrides = {}) {
+  const statuses = [];
+  const ledger = {
+    statuses,
+    cleanupCalls: [],
+    capabilities: fullLedgerCapabilities,
+    tryLock: async () => true,
+    verifyLock: async () => true,
+    markStatus: async (intentId, status, reasonCodes = []) => {
+      statuses.push({ intentId, status, reasonCodes });
+    },
+    recentForWallet: async () => [],
+    ...overrides,
+  };
+  return ledger;
+}
+
+function intentForSigning(overrides = {}) {
+  return {
+    userGoalId: "signing-test",
+    wallet: "0x0000000000000000000000000000000000000001",
+    chainId: 1,
+    actionType: "swap",
+    assetIn: "eth",
+    assetOut: "usdc",
+    amountIn: "1",
+    ...overrides,
+  };
+}
 
 test("qualifies HIP-3 symbols with builder DEX identity", () => {
   assert.equal(qualifyHip3Symbol({ dex: "XYZ", symbol: "SPCX" }), "xyz:spcx");
@@ -246,10 +291,12 @@ test("verifies lock ownership immediately before signing", async () => {
             signCalled = true;
             return {};
           },
+          assertSignedOperationMatchesIntent: async () => true,
         },
         simulator: {
           simulate: async () => baseSimulation,
         },
+        policy: { supportedChainIds: [1] },
       }),
     (error) =>
       error instanceof SafeloopAbort &&
@@ -257,6 +304,185 @@ test("verifies lock ownership immediately before signing", async () => {
   );
 
   assert.equal(signCalled, false);
+});
+
+test("rejects signing when supported chain allowlist is missing", async () => {
+  const ledger = makeSigningLedger();
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: intentForSigning(),
+        ledger,
+        mmaw: {
+          capabilities: { intentBoundSignatures: true },
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => ({}),
+          assertSignedOperationMatchesIntent: async () => true,
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("UNSUPPORTED_CHAIN"),
+  );
+
+  assert.deepEqual(ledger.statuses, []);
+});
+
+test("rejects signing when supported chain allowlist is empty", async () => {
+  const ledger = makeSigningLedger();
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: intentForSigning(),
+        ledger,
+        mmaw: {
+          capabilities: { intentBoundSignatures: true },
+          buildUnsignedOperation: async () => ({}),
+          sign: async () => ({}),
+          assertSignedOperationMatchesIntent: async () => true,
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+        policy: { supportedChainIds: [] },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("UNSUPPORTED_CHAIN"),
+  );
+
+  assert.deepEqual(ledger.statuses, []);
+});
+
+test("allows signing when chain is explicitly allowlisted", async () => {
+  const ledger = makeSigningLedger();
+  const signedOperation = { txHash: "signed-ok" };
+
+  const signed = await failClosedSign({
+    intent: intentForSigning(),
+    ledger,
+    mmaw: {
+      capabilities: { intentBoundSignatures: true },
+      buildUnsignedOperation: async (intent) => ({ intent }),
+      sign: async () => signedOperation,
+      assertSignedOperationMatchesIntent: async ({ intent, unsignedOperation }) =>
+        unsignedOperation.intent.chainId === intent.chainId,
+    },
+    simulator: {
+      simulate: async () => baseSimulation,
+    },
+    policy: { supportedChainIds: [1] },
+  });
+
+  assert.equal(signed, signedOperation);
+  assert.equal(ledger.statuses.at(-1).status, "SIGNED");
+});
+
+test("post-sign assertion mismatch runs cleanup before failing closed", async () => {
+  let cleanupCalled = false;
+  const ledger = makeSigningLedger({
+    cleanupPostSignFailure: async ({ row, reasonCodes, signedOperation }) => {
+      cleanupCalled = true;
+      assert.equal(row.chainId, 1);
+      assert.ok(reasonCodes.includes("SIGNED_OPERATION_INTENT_MISMATCH"));
+      assert.equal(signedOperation.chainId, 999);
+      return { ok: true };
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: intentForSigning(),
+        ledger,
+        mmaw: {
+          capabilities: { intentBoundSignatures: true },
+          buildUnsignedOperation: async (intent) => ({ intent }),
+          sign: async () => ({ chainId: 999 }),
+          assertSignedOperationMatchesIntent: async ({ intent, signedOperation }) =>
+            signedOperation.chainId === intent.chainId,
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+        policy: { supportedChainIds: [1] },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("SIGNED_OPERATION_INTENT_MISMATCH"),
+  );
+
+  assert.equal(cleanupCalled, true);
+  assert.deepEqual(ledger.statuses.at(-1).reasonCodes, [
+    "SIGNED_OPERATION_INTENT_MISMATCH",
+  ]);
+});
+
+test("post-sign assertion cleanup failure leaves cleanup-required reason", async () => {
+  const ledger = makeSigningLedger({
+    cleanupPostSignFailure: async () => ({ ok: false }),
+  });
+
+  await assert.rejects(
+    () =>
+      failClosedSign({
+        intent: intentForSigning(),
+        ledger,
+        mmaw: {
+          capabilities: { intentBoundSignatures: true },
+          buildUnsignedOperation: async (intent) => ({ intent }),
+          sign: async () => ({ chainId: 999 }),
+          assertSignedOperationMatchesIntent: async () => false,
+        },
+        simulator: {
+          simulate: async () => baseSimulation,
+        },
+        policy: { supportedChainIds: [1] },
+      }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("POST_SIGN_CLEANUP_REQUIRED"),
+  );
+
+  assert.ok(
+    ledger.statuses
+      .at(-1)
+      .reasonCodes.includes("POST_SIGN_CLEANUP_REQUIRED"),
+  );
+});
+
+test("sanitizes evidence packets before operator logging", () => {
+  const packet = {
+    wallet: "0x0000000000000000000000000000000000000001",
+    agentWalletAddress: "0x1111111111111111111111111111111111111111",
+    rpcUrl: "https://rpc.example.test/internal-key",
+    nonce: 7,
+    txHash:
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    authorization: "Bearer super-secret-token",
+    nested: {
+      message:
+        "sent via https://private-rpc.example.test with 0x2222222222222222222222222222222222222222",
+    },
+  };
+
+  const sanitized = sanitizeEvidencePacket(packet);
+  const serialized = JSON.stringify(sanitized);
+
+  assert.ok(!serialized.includes(packet.wallet));
+  assert.ok(!serialized.includes(packet.agentWalletAddress));
+  assert.ok(!serialized.includes("https://rpc.example.test/internal-key"));
+  assert.ok(!serialized.includes(String(packet.nonce)));
+  assert.ok(!serialized.includes(packet.txHash));
+  assert.ok(!serialized.includes("super-secret-token"));
+  assert.ok(serialized.includes("[REDACTED_ADDRESS]"));
+  assert.ok(serialized.includes("[REDACTED_RPC_URL]"));
+  assert.ok(serialized.includes("[REDACTED_NONCE]"));
 });
 
 test("requires signer-bound intent protection against rollback replay", async () => {

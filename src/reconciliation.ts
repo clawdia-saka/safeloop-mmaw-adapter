@@ -17,7 +17,7 @@ export type WalletRequestState =
 export type WalletRequestObservation = {
   pollingId?: string;
   state: WalletRequestState;
-  txHash?: \`0x\${string}\`;
+  txHash?: `0x${string}`;
   intent?: string;
   gasBurnedUsd?: string;
 };
@@ -45,7 +45,7 @@ export type ReconciliationDecision = {
  */
 function extendLockLease(requestId: string, ms: number) {
   // Emit signal to lock manager (simulated via log)
-  console.log(\`EXTENDING_LOCK_LEASE:\${requestId}:\${ms}\`);
+  console.log(`EXTENDING_LOCK_LEASE:${requestId}:${ms}`);
 }
 
 export function reconcileWalletRequest(
@@ -126,7 +126,7 @@ export function reconcileVenueState(
       return terminal("CONFIRMED");
     }
 
-    console.warn(\`UNGUARDED_NON_PERP_ACTION:\${actionType}\`);
+    console.warn(`UNGUARDED_NON_PERP_ACTION:${actionType}`);
     return terminal("CONFIRMED");
   }
 

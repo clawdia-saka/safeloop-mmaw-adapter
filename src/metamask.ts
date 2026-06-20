@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import type { CanonicalIntent, MmawSigner, AbortReason } from "./index.js";
+import { sanitizeEvidencePacket } from "./evidence.js";
 
-export type EvidencePacket = {
+export type MetaMaskEvidencePacket = {
   command: string;
   exitCode: number | null;
   stdout: string;
@@ -15,7 +16,7 @@ export class IntentGuardError extends Error {
   constructor(
     public readonly code: AbortReason,
     public readonly reason: string,
-    public readonly evidence?: EvidencePacket,
+    public readonly evidence?: MetaMaskEvidencePacket,
   ) {
     super(reason);
     this.name = "IntentGuardError";
@@ -51,6 +52,10 @@ export function verifyIntentTrajectory(intent: CanonicalIntent): void {
 export type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
+  assertSignedOperationMatchesIntent?: MmawSigner<
+    TUnsignedOperation,
+    TSignedOperation
+  >["assertSignedOperationMatchesIntent"];
 };
 
 export function createMetaMaskAgenticSdkSigner<
@@ -72,7 +77,7 @@ export function createMetaMaskAgenticSdkSigner<
         return await sdk.sign(operation);
       } catch (error: any) {
         // DM-F3: Structured Failure Evidence Packet
-        const packet: EvidencePacket = {
+        const packet: MetaMaskEvidencePacket = sanitizeEvidencePacket({
           command: "sdk.sign",
           exitCode: null,
           stdout: "",
@@ -80,8 +85,8 @@ export function createMetaMaskAgenticSdkSigner<
           invariantViolations: [],
           timestamp: new Date().toISOString(),
           requestId: intent?.userGoalId || "unknown",
-        };
-        
+        });
+
         // Fire-and-forget audit log (simulated)
         console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
 
@@ -90,6 +95,8 @@ export function createMetaMaskAgenticSdkSigner<
         throw wrapped;
       }
     },
+    assertSignedOperationMatchesIntent:
+      sdk.assertSignedOperationMatchesIntent?.bind(sdk),
   };
 }
 
@@ -153,8 +160,8 @@ export function buildWalletRequestsWatchArgs(pollingId: string): string[] {
 }
 
 export function buildTxHistoryArgs(params: {
-  addresses?: `0x\${string}`[];
-  chains?: Array<number | `eip155:\${number}`>;
+  addresses?: `0x${string}`[];
+  chains?: Array<number | `eip155:${number}`>;
   type?: "in" | "out" | "self" | string;
   limit?: number;
 } = {}): string[] {
@@ -324,7 +331,7 @@ function requireFields<T extends keyof CanonicalIntent>(
 ): asserts intent is CanonicalIntent & Required<Pick<CanonicalIntent, T>> {
   const missing = fields.filter((field) => !intent[field]);
   if (missing.length > 0) {
-    throw new Error(`MISSING_MM_CLI_FIELDS:\${missing.join(",")}`);
+    throw new Error(`MISSING_MM_CLI_FIELDS:${missing.join(",")}`);
   }
 }
 
@@ -360,20 +367,20 @@ function runMmCli(operation: MmCliOperation): Promise<{
       }
       
       // DM-F3: Structured Failure Evidence Packet
-      const packet: EvidencePacket = {
-        command: \`\${operation.command} \${operation.args.join(" ")}\`,
+      const packet: MetaMaskEvidencePacket = sanitizeEvidencePacket({
+        command: `${operation.command} ${operation.args.join(" ")}`,
         exitCode: code,
         stdout,
         stderr,
         invariantViolations: [],
         timestamp: new Date().toISOString(),
         requestId: operation.intent.userGoalId,
-      };
+      });
 
       // Fire-and-forget audit log (simulated)
       console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
 
-      const error = new Error(\`MM_CLI_FAILED:\${code}:\${stderr}\`);
+      const error = new Error(`MM_CLI_FAILED:${code}:${stderr}`);
       (error as any).evidence = packet;
       reject(error);
     });

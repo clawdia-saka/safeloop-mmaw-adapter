@@ -103,6 +103,8 @@ Recommended invariants:
 - reserve gas for MFA/broadcasting requests before confirmation
 - keep partial fills pending until size reconciliation completes
 - require signer-bound intent protection against storage rollback replay
+- require post-sign assertion that the signed payload still matches the approved intent
+- require explicit supported chain allowlists before perps signing
 - require monotonic oracle age and clock-skew checks
 - allow emergency close/cancel flows to preempt lower-priority collateral locks
 - require explicit collateral pool identity for shared collateral paths
@@ -119,6 +121,7 @@ Recommended invariants:
 - detect overfit time calibration when volatility regimes change
 - stop oscillating partial-fill reconciliation loops
 - surface guard-composition failures instead of hiding them in generic aborts
+- sanitize evidence packets before operator logging or public sharing
 - require position size delta checks for partial close and modify reconciliation
 
 ## Operational Notes
@@ -133,6 +136,9 @@ Recommended invariants:
 - Require fresh Hyperliquid mark/index price inputs for every margin simulation.
 - Require volatility metadata so oracle freshness can tighten during fast markets.
 - Require signature expiry metadata such as a short timestamp or venue-native time-in-force.
+- Require signer integrations to return a signed payload without broadcasting so post-sign assertion can run.
+- Treat missing or empty chain allowlists as block-all.
+- Sanitize evidence packets before sharing logs, issues, or demos.
 - Track native gas balance and recent gas burn before allowing new open actions.
 - Include in-flight gas reservations and reverted gas burn in runway accounting.
 - Renew or explicitly reconcile MFA-wait locks before their lease expires.

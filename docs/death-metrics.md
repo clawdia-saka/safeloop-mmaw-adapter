@@ -1036,3 +1036,81 @@ Implementation hook:
 - `AgentIntent.reduceOnly`
 - `SafeloopPolicy.allowReduceOnlyEmergencyDuringQuorumPartition`
 - `RPC_QUORUM_PARTITION`
+
+## DM-F5: Chain Allowlist Gap
+
+Severity: High
+
+Scenario:
+
+```text
+agent provides a chainId dynamically
+operation type is valid
+chain is unsupported or untested
+signer still builds or signs the operation
+unsupported network behavior bypasses trajectory checks
+```
+
+Required guard:
+
+- Policy must explicitly list supported chain IDs.
+- Missing or empty allowlists block all chains.
+- Unsupported chain IDs abort before ledger lock and signing.
+
+Implementation hook:
+
+- `SafeloopPolicy.supportedChainIds`
+- `UNSUPPORTED_CHAIN`
+
+## DM-F6: Public Credential Leak via Evidence Packets
+
+Severity: Critical
+
+Scenario:
+
+```text
+operator shares a demo, issue, or debug trace
+evidence packet contains wallet address, RPC URL, nonce, tx hash, or token
+public artifact becomes an intelligence leak
+```
+
+Required guard:
+
+- Evidence packets must be sanitized before operator logging or sharing.
+- Sanitization is default-on for addresses, RPC URLs, nonce fields, tx hashes,
+  authorization headers, API keys, and token-like strings.
+- Public docs and tests must not contain live credentials or operator logs.
+
+Implementation hook:
+
+- `sanitizeEvidencePacket`
+
+## DM-F7: Signed Operation Intent Mismatch
+
+Severity: Critical
+
+Scenario:
+
+```text
+canonical intent passes simulation and trajectory checks
+signer returns a signed operation with different chain, target, route, or amount
+system accepts signed payload without comparing it to the approved intent
+post-sign mismatch leaves nonce, gas, and lock reservations behind
+```
+
+Required guard:
+
+- Signers must provide post-sign assertion against the canonical intent.
+- Missing assertion support fails closed before signing.
+- Mismatched signed operations fail closed after signing and must run cleanup.
+- Cleanup releases or invalidates nonce, gas reservation, lock lease, and
+  fencing resources.
+- Cleanup failure records a distinct reason.
+
+Implementation hook:
+
+- `MmawSigner.assertSignedOperationMatchesIntent`
+- `SafeloopPolicy.requirePostSignIntentAssertion`
+- `SIGNED_OPERATION_ASSERTION_REQUIRED`
+- `SIGNED_OPERATION_INTENT_MISMATCH`
+- `POST_SIGN_CLEANUP_REQUIRED`
