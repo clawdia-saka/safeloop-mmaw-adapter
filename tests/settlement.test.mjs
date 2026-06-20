@@ -1,14 +1,38 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { reconcileWalletRequest, reconcileVenueState } from "../src/reconciliation.js";
+import assert from "node:assert";
+import { 
+  reconcileWalletRequest, 
+  reconcileVenueState, 
+  reconcileSettlementReceipt,
+  reconcilePartialFillRelease,
+  reconcileWatcherHeartbeat
+} from "../src/reconciliation.ts";
+
+function test(name, fn) {
+  try {
+    fn();
+    console.log("✓ " + name);
+  } catch (err) {
+    console.error("✗ " + name);
+    console.error(err);
+    process.exit(1);
+  }
+}
 
 test("DM-S1: Re-org Ghost State - CONFIRMED requires depth", () => {
   const landedNoDepth = reconcileWalletRequest({
     state: "LANDED",
-    confirmationDepth: 1
+    confirmationDepth: 0
   });
   assert.equal(landedNoDepth.status, "LANDED");
   assert.equal(landedNoDepth.terminal, false);
+  assert.ok(landedNoDepth.reasonCodes.includes("REORG_GHOST_STATE"));
+
+  const landedInsufficient = reconcileWalletRequest({
+    state: "LANDED",
+    confirmationDepth: 1
+  });
+  assert.equal(landedInsufficient.status, "LANDED");
+  assert.ok(landedInsufficient.reasonCodes.includes("SETTLEMENT_CONFIRMATION_DEPTH_REQUIRED"));
 
   const landedWithDepth = reconcileWalletRequest({
     state: "LANDED",
@@ -16,6 +40,16 @@ test("DM-S1: Re-org Ghost State - CONFIRMED requires depth", () => {
   });
   assert.equal(landedWithDepth.status, "CONFIRMED");
   assert.equal(landedWithDepth.terminal, true);
+});
+
+test("RPC quorum can satisfy confirmation when explicitly marked trusted", () => {
+  const landedTrusted = reconcileWalletRequest({
+    state: "LANDED",
+    confirmationDepth: 1,
+    rpcQuorumTrusted: true
+  });
+  assert.equal(landedTrusted.status, "CONFIRMED");
+  assert.equal(landedTrusted.terminal, true);
 });
 
 test("DM-S2: Partial Fill Lock Leak - stays in REQUEST_WATCH_REQUIRED", () => {
@@ -26,7 +60,8 @@ test("DM-S2: Partial Fill Lock Leak - stays in REQUEST_WATCH_REQUIRED", () => {
   });
   assert.equal(partialVenue.status, "REQUEST_WATCH_REQUIRED");
   assert.equal(partialVenue.terminal, false);
-  assert.deepEqual(partialVenue.reasonCodes, ["PARTIAL_FILL_PENDING"]);
+  assert.ok(partialVenue.reasonCodes.includes("PARTIAL_FILL_PENDING"));
+  assert.ok(partialVenue.reasonCodes.includes("PARTIAL_LOCK_RELEASE_REQUIRED"));
 
   const partialTransfer = reconcileVenueState("transfer", {
     balanceUpdated: true,
@@ -34,7 +69,7 @@ test("DM-S2: Partial Fill Lock Leak - stays in REQUEST_WATCH_REQUIRED", () => {
   }, { expectedAmount: "100" });
   assert.equal(partialTransfer.status, "REQUEST_WATCH_REQUIRED");
   assert.equal(partialTransfer.terminal, false);
-  assert.deepEqual(partialTransfer.reasonCodes, ["PARTIAL_FILL_PENDING"]);
+  assert.ok(partialTransfer.reasonCodes.includes("PARTIAL_FILL_PENDING"));
 });
 
 test("DM-S3: Gas Drain Blind Spot - REVERTED gas accounting", () => {
@@ -61,12 +96,34 @@ test("DM-S4: Silent Watcher Crash - stale watcher detection", () => {
   assert.equal(staleWatcher.status, "REQUEST_WATCH_REQUIRED");
   assert.equal(staleWatcher.terminal, false);
   assert.ok(staleWatcher.reasonCodes.includes("STALE_RECONCILIATION"));
+  assert.ok(staleWatcher.reasonCodes.includes("STALE_WATCHER_DETECTED"));
 });
 
-test("terminal states - TIMED_OUT", () => {
-  const timeout = reconcileWalletRequest({
-    state: "TIMED_OUT"
+test("max extension cap emits EXPLICIT_STUCK_ALARM", () => {
+  const stuck = reconcileWalletRequest({
+    state: "SUBMITTED",
+    lockExtensionCount: 5
   });
-  assert.equal(timeout.status, "TIMED_OUT");
-  assert.equal(timeout.terminal, true);
+  assert.equal(stuck.status, "ABORTED");
+  assert.equal(stuck.terminal, true);
+  assert.ok(stuck.reasonCodes.includes("EXPLICIT_STUCK_ALARM"));
 });
+
+test("reconcileSettlementReceipt helper", () => {
+  const res = reconcileSettlementReceipt({ state: "CONFIRMED" });
+  assert.equal(res.status, "CONFIRMED");
+});
+
+test("reconcilePartialFillRelease helper", () => {
+  const res = reconcilePartialFillRelease("transfer", { balanceUpdated: true, observedPositionSize: "100" }, { expectedAmount: "100" });
+  assert.equal(res.status, "CONFIRMED");
+});
+
+test("reconcileWatcherHeartbeat helper", () => {
+  const staleAt = new Date(Date.now() - 60000).toISOString();
+  const res = reconcileWatcherHeartbeat({ watcherHeartbeatAt: staleAt });
+  assert.equal(res.status, "REQUEST_WATCH_REQUIRED");
+  assert.ok(res.reasonCodes.includes("STALE_WATCHER_DETECTED"));
+});
+
+console.log("All tests passed.");

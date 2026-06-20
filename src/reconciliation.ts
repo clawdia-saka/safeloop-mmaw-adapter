@@ -3,6 +3,7 @@ import type { AbortReason, LedgerStatus } from "./index.js";
 const MFA_TIMEOUT_MS = 90000;
 const SETTLEMENT_WATCHER_HEARTBEAT_MS = 30000;
 const MIN_CONFIRMATION_DEPTH = 3;
+const MAX_LOCK_EXTENSIONS = 5;
 
 export type WalletRequestState =
   | "PENDING"
@@ -25,6 +26,8 @@ export type WalletRequestObservation = {
   gasBurnedUsd?: string;
   confirmationDepth?: number;
   watcherHeartbeatAt?: string;
+  lockExtensionCount?: number;
+  rpcQuorumTrusted?: boolean;
 };
 
 export type VenueObservation = {
@@ -68,7 +71,12 @@ export function reconcileWalletRequest(
 ): ReconciliationDecision {
   // DM-S4: Silent Watcher Crash
   if (isWatcherStale(observation.watcherHeartbeatAt)) {
-    return pending("REQUEST_WATCH_REQUIRED", ["STALE_RECONCILIATION", "LOCK_FENCING_REQUIRED"]);
+    return pending("REQUEST_WATCH_REQUIRED", ["STALE_RECONCILIATION", "LOCK_FENCING_REQUIRED", "STALE_WATCHER_DETECTED"]);
+  }
+
+  // Max extension cap
+  if ((observation.lockExtensionCount ?? 0) >= MAX_LOCK_EXTENSIONS) {
+    return terminal("ABORTED", ["EXPLICIT_STUCK_ALARM"]);
   }
 
   switch (observation.state) {
@@ -96,10 +104,14 @@ export function reconcileWalletRequest(
       return pending("SUBMITTED");
     case "LANDED":
       // DM-S1: Re-org Ghost State
-      if ((observation.confirmationDepth ?? 0) >= MIN_CONFIRMATION_DEPTH) {
+      const depth = observation.confirmationDepth ?? 0;
+      if (depth >= MIN_CONFIRMATION_DEPTH || (depth > 0 && observation.rpcQuorumTrusted)) {
         return terminal("CONFIRMED");
       }
-      return pending("LANDED");
+      if (depth === 0 && !observation.rpcQuorumTrusted) {
+        return pending("LANDED", ["REORG_GHOST_STATE"]);
+      }
+      return pending("LANDED", ["SETTLEMENT_CONFIRMATION_DEPTH_REQUIRED"]);
     case "CONFIRMED":
       return terminal("CONFIRMED");
     case "REVERTED":
@@ -133,7 +145,7 @@ export function reconcileVenueState(
       if (observation.observedPositionSize && context?.expectedAmount) {
         if (parseDecimal(observation.observedPositionSize)! < parseDecimal(context.expectedAmount)!) {
           // DM-S2: Partial Fill Lock Leak
-          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING", "PARTIAL_LOCK_RELEASE_REQUIRED"]);
         }
       }
       return terminal("CONFIRMED");
@@ -146,7 +158,7 @@ export function reconcileVenueState(
       if (observation.observedPositionSize && context?.minOutputAmount) {
         if (parseDecimal(observation.observedPositionSize)! < parseDecimal(context.minOutputAmount)!) {
           // DM-S2: Partial Fill Lock Leak
-          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING", "PARTIAL_LOCK_RELEASE_REQUIRED"]);
         }
       }
       return terminal("CONFIRMED");
@@ -158,11 +170,11 @@ export function reconcileVenueState(
 
   // DM-S2: Partial Fill Lock Leak
   if (observation.fillStatus === "partial") {
-    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING", "PARTIAL_LOCK_RELEASE_REQUIRED"]);
   }
 
   if (hasUnfilledExpectedSize(observation)) {
-    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
+    return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING", "PARTIAL_LOCK_RELEASE_REQUIRED"]);
   }
 
   if (requiresPositionDelta(actionType, observation)) {
@@ -189,6 +201,38 @@ export function reconcileVenueState(
   }
 
   return pending("REQUEST_WATCH_REQUIRED", ["POSITION_NOT_RECONCILED"]);
+}
+
+/**
+ * Pure helper for settlement receipt reconciliation
+ */
+export function reconcileSettlementReceipt(
+  observation: WalletRequestObservation
+): ReconciliationDecision {
+  return reconcileWalletRequest(observation);
+}
+
+/**
+ * Pure helper for partial fill release reconciliation
+ */
+export function reconcilePartialFillRelease(
+  actionType: string,
+  observation: VenueObservation,
+  context?: { expectedAmount?: string; minOutputAmount?: string }
+): ReconciliationDecision {
+  return reconcileVenueState(actionType, observation, context);
+}
+
+/**
+ * Pure helper for watcher heartbeat reconciliation
+ */
+export function reconcileWatcherHeartbeat(
+  observation: WalletRequestObservation
+): ReconciliationDecision {
+  if (isWatcherStale(observation.watcherHeartbeatAt)) {
+    return pending("REQUEST_WATCH_REQUIRED", ["STALE_WATCHER_DETECTED"]);
+  }
+  return pending("REQUEST_PENDING");
 }
 
 function hasUnfilledExpectedSize(observation: VenueObservation): boolean {

@@ -16,6 +16,11 @@ const REASON_DESCRIPTIONS: Record<string, string> = {
   "SIMULATION_FAILED": "Simulation failed on-chain. Transaction would revert.",
   "LOCK_LEASE_EXPIRED": "Atomic lock lease expired before signing completion.",
   "ACCOUNT_HEALTH_LIMIT": "Account margin ratio or exposure limits reached.",
+  "SETTLEMENT_CONFIRMATION_DEPTH_REQUIRED": "Insufficient block confirmations for settlement receipt finality.",
+  "REORG_GHOST_STATE": "Landed transaction not found in current chain tip (potential orphan or re-org).",
+  "PARTIAL_LOCK_RELEASE_REQUIRED": "Incomplete fill detected; partial lock release and continued monitoring required.",
+  "STALE_WATCHER_DETECTED": "Settlement watcher heartbeat is overdue; process may be stale or crashed.",
+  "EXPLICIT_STUCK_ALARM": "Maximum lock extension cap reached; manual intervention or escalation required.",
 };
 
 export interface TraceContext {
