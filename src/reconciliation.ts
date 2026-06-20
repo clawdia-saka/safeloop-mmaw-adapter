@@ -1,6 +1,8 @@
 import type { AbortReason, LedgerStatus } from "./index.js";
 
 const MFA_TIMEOUT_MS = 90000;
+const SETTLEMENT_WATCHER_HEARTBEAT_MS = 30000;
+const MIN_CONFIRMATION_DEPTH = 3;
 
 export type WalletRequestState =
   | "PENDING"
@@ -8,6 +10,7 @@ export type WalletRequestState =
   | "BROADCASTING"
   | "BROADCAST_TRACKING_EXPIRED"
   | "SUBMITTED"
+  | "LANDED"
   | "CONFIRMED"
   | "REVERTED"
   | "FAILED"
@@ -20,6 +23,8 @@ export type WalletRequestObservation = {
   txHash?: `0x${string}`;
   intent?: string;
   gasBurnedUsd?: string;
+  confirmationDepth?: number;
+  watcherHeartbeatAt?: string;
 };
 
 export type VenueObservation = {
@@ -48,10 +53,24 @@ function extendLockLease(requestId: string, ms: number) {
   console.log(`EXTENDING_LOCK_LEASE:${requestId}:${ms}`);
 }
 
+/**
+ * DM-S4: Silent Watcher Crash - Heartbeat verification
+ */
+function isWatcherStale(heartbeatAt?: string): boolean {
+  if (!heartbeatAt) return false;
+  const elapsed = Date.now() - Date.parse(heartbeatAt);
+  return elapsed > SETTLEMENT_WATCHER_HEARTBEAT_MS;
+}
+
 export function reconcileWalletRequest(
   observation: WalletRequestObservation,
   context?: { requestId: string; updatedAt?: string },
 ): ReconciliationDecision {
+  // DM-S4: Silent Watcher Crash
+  if (isWatcherStale(observation.watcherHeartbeatAt)) {
+    return pending("REQUEST_WATCH_REQUIRED", ["STALE_RECONCILIATION", "LOCK_FENCING_REQUIRED"]);
+  }
+
   switch (observation.state) {
     case "PENDING":
       return pending("REQUEST_PENDING");
@@ -75,9 +94,16 @@ export function reconcileWalletRequest(
       return terminal("TIMED_OUT", ["BROADCAST_TRACKING_EXPIRED"]);
     case "SUBMITTED":
       return pending("SUBMITTED");
+    case "LANDED":
+      // DM-S1: Re-org Ghost State
+      if ((observation.confirmationDepth ?? 0) >= MIN_CONFIRMATION_DEPTH) {
+        return terminal("CONFIRMED");
+      }
+      return pending("LANDED");
     case "CONFIRMED":
-      return terminal("LANDED");
+      return terminal("CONFIRMED");
     case "REVERTED":
+      // DM-S3: Gas Drain Blind Spot
       return terminal(
         "REVERTED",
         observation.gasBurnedUsd === undefined
@@ -106,8 +132,8 @@ export function reconcileVenueState(
       }
       if (observation.observedPositionSize && context?.expectedAmount) {
         if (parseDecimal(observation.observedPositionSize)! < parseDecimal(context.expectedAmount)!) {
-          // Map to BALANCE_NOT_CONFIRMED (using closest existing AbortReason)
-          return terminal("ABORTED", ["PARTIAL_FILL_PENDING"]);
+          // DM-S2: Partial Fill Lock Leak
+          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
         }
       }
       return terminal("CONFIRMED");
@@ -119,8 +145,8 @@ export function reconcileVenueState(
       }
       if (observation.observedPositionSize && context?.minOutputAmount) {
         if (parseDecimal(observation.observedPositionSize)! < parseDecimal(context.minOutputAmount)!) {
-          // Map to SLIPPAGE_EXCEEDED (using closest existing AbortReason)
-          return terminal("ABORTED", ["NAV_DELTA_LIMIT"]);
+          // DM-S2: Partial Fill Lock Leak
+          return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
         }
       }
       return terminal("CONFIRMED");
@@ -130,6 +156,7 @@ export function reconcileVenueState(
     return terminal("CONFIRMED");
   }
 
+  // DM-S2: Partial Fill Lock Leak
   if (observation.fillStatus === "partial") {
     return pending("REQUEST_WATCH_REQUIRED", ["PARTIAL_FILL_PENDING"]);
   }
