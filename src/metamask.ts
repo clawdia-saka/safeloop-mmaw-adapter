@@ -112,7 +112,7 @@ export function createMetaMaskAgenticSdkSigner<
         // Fire-and-forget audit log (simulated)
         console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
 
-        const wrapped = new Error(`SDK_SIGN_FAILED: ${error.message}`);
+        const wrapped = new Error("SDK_SIGN_FAILED_REDACTED");
         (wrapped as any).evidence = packet;
         throw wrapped;
       }
