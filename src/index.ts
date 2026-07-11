@@ -658,12 +658,12 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     ) {
       preflightReasons.push("COLLATERAL_POOL_REQUIRED");
     }
-    if (
-      policy.requireSignerIntentBinding &&
-      !params.mmaw.capabilities?.intentBoundSignatures
-    ) {
-      preflightReasons.push("SIGNER_INTENT_BINDING_REQUIRED");
-    }
+  }
+  if (
+    policy.requireSignerIntentBinding &&
+    !params.mmaw.capabilities?.intentBoundSignatures
+  ) {
+    preflightReasons.push("SIGNER_INTENT_BINDING_REQUIRED");
   }
   if (preflightReasons.length > 0) throw new SafeloopAbort(preflightReasons);
 

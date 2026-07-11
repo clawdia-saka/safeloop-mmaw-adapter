@@ -2298,6 +2298,37 @@ test("flags stale Hyperliquid oracle input before perps signing", () => {
   assert.ok(reasons.includes("ORACLE_PRICE_STALE"));
 });
 
+test("signer intent binding cannot be bypassed by disabling durable ledger policy", async () => {
+  const ledger = makeSigningLedger();
+  await assert.rejects(
+    () => failClosedSign({
+      intent: intentForSigning(),
+      ledger,
+      mmaw: {
+        buildUnsignedOperation: async () => ({}),
+        sign: async () => ({}),
+        assertSignedOperationMatchesIntent: async () => true,
+      },
+      simulator: { simulate: async () => baseSimulation },
+      policy: { requireDurableLedger: false, requireSignerIntentBinding: true, supportedChainIds: [1] },
+    }),
+    (error) => error instanceof SafeloopAbort && error.reasonCodes.includes("SIGNER_INTENT_BINDING_REQUIRED"),
+  );
+});
+
+test("SDK signer errors never rethrow raw credential-bearing diagnostics", async () => {
+  const signer = createMetaMaskAgenticSdkSigner({
+    capabilities: { intentBoundSignatures: true },
+    buildUnsignedOperation: async (intent) => ({ intent }),
+    sign: async () => { throw new Error("Bearer raw-secret-value"); },
+    assertSignedOperationMatchesIntent: async () => true,
+  });
+  await assert.rejects(
+    () => signer.sign({ intent: intentForSigning() }),
+    (error) => error instanceof Error && error.message === "SDK_SIGN_FAILED_REDACTED" && !error.message.includes("raw-secret"),
+  );
+});
+
 function row(overrides) {
   const canonical = canonicalizeIntent({
     userGoalId: "test-goal",
