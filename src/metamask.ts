@@ -23,6 +23,22 @@ export class IntentGuardError extends Error {
   }
 }
 
+function sanitizeMetaMaskEvidence(
+  packet: MetaMaskEvidencePacket,
+): MetaMaskEvidencePacket {
+  const sanitized = sanitizeEvidencePacket(packet);
+  if (typeof sanitized !== "string") return sanitized;
+  return {
+    command: "[REDACTED]",
+    exitCode: null,
+    stdout: "",
+    stderr: sanitized,
+    invariantViolations: ["EVIDENCE_MASKING_FAILED"],
+    timestamp: new Date(0).toISOString(),
+    requestId: "[REDACTED]",
+  };
+}
+
 /**
  * DM-F1: Pre-Sign Intent Invariant Gate
  * Blocking interceptor to verify intent trajectory before signing.
@@ -50,6 +66,9 @@ export function verifyIntentTrajectory(intent: CanonicalIntent): void {
 }
 
 export type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
+  capabilities?: {
+    intentBoundSignatures?: boolean;
+  };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
   assertSignedOperationMatchesIntent?: MmawSigner<
@@ -65,6 +84,9 @@ export function createMetaMaskAgenticSdkSigner<
   sdk: MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation>,
 ): MmawSigner<TUnsignedOperation, TSignedOperation> {
   return {
+    capabilities: sdk.capabilities?.intentBoundSignatures
+      ? { intentBoundSignatures: true }
+      : undefined,
     buildUnsignedOperation: (intent) => sdk.buildUnsignedOperation(intent),
     sign: async (operation: TUnsignedOperation) => {
       // DM-F1: Interceptor for SDK
@@ -77,7 +99,7 @@ export function createMetaMaskAgenticSdkSigner<
         return await sdk.sign(operation);
       } catch (error: any) {
         // DM-F3: Structured Failure Evidence Packet
-        const packet: MetaMaskEvidencePacket = sanitizeEvidencePacket({
+        const packet = sanitizeMetaMaskEvidence({
           command: "sdk.sign",
           exitCode: null,
           stdout: "",
@@ -367,7 +389,7 @@ function runMmCli(operation: MmCliOperation): Promise<{
       }
       
       // DM-F3: Structured Failure Evidence Packet
-      const packet: MetaMaskEvidencePacket = sanitizeEvidencePacket({
+      const packet = sanitizeMetaMaskEvidence({
         command: `${operation.command} ${operation.args.join(" ")}`,
         exitCode: code,
         stdout,

@@ -20,6 +20,8 @@ import {
 import {
   buildTxHistoryArgs,
   buildWalletRequestsWatchArgs,
+  createMetaMaskAgenticSdkSigner,
+  createMmCliSigner,
 } from "../dist/metamask.js";
 
 const baseSimulation = {
@@ -177,6 +179,29 @@ test("builds MetaMask request watch and tx history args", () => {
     "--limit",
     "10",
   ]);
+});
+
+test("MetaMask helpers advertise intent binding only when explicitly provided", () => {
+  const unsafeSdkSigner = createMetaMaskAgenticSdkSigner({
+    buildUnsignedOperation: async (intent) => ({ intent }),
+    sign: async (operation) => operation,
+  });
+  assert.equal(unsafeSdkSigner.capabilities, undefined);
+
+  const boundSdkSigner = createMetaMaskAgenticSdkSigner({
+    capabilities: { intentBoundSignatures: true },
+    buildUnsignedOperation: async (intent) => ({ intent }),
+    sign: async (operation) => operation,
+    assertSignedOperationMatchesIntent: ({ intent, signedOperation }) =>
+      signedOperation.intent.chainId === intent.chainId,
+  });
+  assert.deepEqual(boundSdkSigner.capabilities, {
+    intentBoundSignatures: true,
+  });
+  assert.equal(typeof boundSdkSigner.assertSignedOperationMatchesIntent, "function");
+
+  const cliSigner = createMmCliSigner(async () => ({ stdout: "", stderr: "" }));
+  assert.equal(cliSigner.capabilities, undefined);
 });
 
 test("requires a durable atomic ledger before signing", async () => {
