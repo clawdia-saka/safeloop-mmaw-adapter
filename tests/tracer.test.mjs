@@ -1,5 +1,5 @@
-import { formatDebugTrace } from "../src/tracer.ts";
-import { sanitizeEvidencePacket } from "../src/evidence.ts";
+import { formatDebugTrace } from "../dist/tracer.js";
+import { sanitizeEvidencePacket } from "../dist/evidence.js";
 import assert from "node:assert";
 import { test } from "node:test";
 
@@ -28,7 +28,7 @@ test("DM-F9: Nested objects and deep regex masking", () => {
   // Verify masking of deep nested properties
   assert.ok(result.includes("[REDACTED_EMAIL]"), "Should mask email");
   assert.ok(result.includes("[REDACTED_SECRET]"), "Should mask private key");
-  assert.ok(result.includes("0x742d...f44e"), "Should mask wallet address with prefix/suffix");
+  assert.ok(result.includes("[REDACTED_ADDRESS]"), "Should mask wallet address");
   
   // Negative checks
   assert.ok(!result.includes("leak@example.com"));

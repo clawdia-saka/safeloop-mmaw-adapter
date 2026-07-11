@@ -89,7 +89,7 @@ function redactEvidenceString(value: string): string {
   return value
     .replace(/https?:\/\/[^\s"'<>]+/gi, "[REDACTED_RPC_URL]")
     .replace(/0x[a-fA-F0-9]{64}/g, "[REDACTED_SECRET]")
-    .replace(/0x[a-fA-F0-9]{40}/g, (match) => match.slice(0, 6) + "..." + match.slice(-4))
+    .replace(/0x[a-fA-F0-9]{40}/g, "[REDACTED_ADDRESS]")
     .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, "[REDACTED_EMAIL]")
     .replace(
       /\b(?:gho|ghp|sk|pk|xoxb|xoxp)_[A-Za-z0-9_=-]{12,}\b/g,

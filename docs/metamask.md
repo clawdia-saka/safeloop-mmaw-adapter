@@ -35,12 +35,22 @@ Safeloop expects the MetaMask SDK object to expose two operations:
 
 ```ts
 type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
+  capabilities?: { intentBoundSignatures?: boolean };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
+  assertSignedOperationMatchesIntent?(params: {
+    intent: CanonicalIntent;
+    unsignedOperation: TUnsignedOperation;
+    signedOperation: TSignedOperation;
+  }): Promise<boolean> | boolean;
 };
 ```
 
 Safeloop calls `buildUnsignedOperation`, runs ledger/simulation/invariant checks, and only then calls `sign`.
+The adapter propagates `intentBoundSignatures: true` only when the concrete SDK
+explicitly declares it. The default is untrusted and fails closed. Production
+integrations must also provide the post-sign assertion; the adapter does not
+infer cryptographic binding from an operation shape.
 
 ## CLI Path
 
@@ -59,6 +69,8 @@ Supported commands in the current prototype:
 - `mm tx history`
 
 The CLI adapter builds the `mm` command after intent canonicalization, but execution still passes through `failClosedSign`.
+The generic CLI wrapper does not advertise signer-bound intent protection and
+therefore cannot pass the default production policy by itself.
 
 Current mapping:
 
