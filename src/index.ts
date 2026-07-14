@@ -85,6 +85,7 @@ export type AbortReason =
   | "SIGNER_INTENT_BINDING_REQUIRED"
   | "SIGNED_OPERATION_ASSERTION_REQUIRED"
   | "SIGNED_OPERATION_INTENT_MISMATCH"
+  | "NON_BROADCASTING_SIGNER_REQUIRED"
   | "POST_SIGN_CLEANUP_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
   | "STALE_RECONCILIATION"
@@ -314,6 +315,7 @@ export type Ledger = {
 export type MmawSigner<TUnsignedOperation, TSignedOperation> = {
   capabilities?: {
     intentBoundSignatures?: boolean;
+    nonBroadcastingSignatures?: boolean;
   };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
@@ -605,6 +607,9 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   ) {
     preflightReasons.push("SIGNED_OPERATION_ASSERTION_REQUIRED");
   }
+  if (!params.mmaw.capabilities?.nonBroadcastingSignatures) {
+    preflightReasons.push("NON_BROADCASTING_SIGNER_REQUIRED");
+  }
 
   if (policy.requireDurableLedger) {
     if (!params.ledger.capabilities?.durable) {
@@ -747,6 +752,14 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   await params.ledger.markStatus(intentId, "SIGNING");
   await verifyActiveLockOwnership(params.ledger, row);
 
+  if (
+    row.signatureExpiresAt &&
+    isExpiredOrWithin(row.signatureExpiresAt, policy.maxClockSkewMs)
+  ) {
+    await params.ledger.markStatus(intentId, "ABORTED", ["SIGNATURE_EXPIRED"]);
+    throw new SafeloopAbort(["SIGNATURE_EXPIRED"]);
+  }
+
   try {
     const signed = await params.mmaw.sign(unsignedOperation);
     if (policy.requirePostSignIntentAssertion) {
@@ -878,7 +891,13 @@ export function checkTrajectoryInvariants(params: {
     ) {
       reasons.add("SIGNATURE_EXPIRY_REQUIRED");
     }
-    if (simulation.signatureExpiresAt && isExpired(simulation.signatureExpiresAt)) {
+    if (
+      simulation.signatureExpiresAt &&
+      isExpiredOrWithin(
+        simulation.signatureExpiresAt,
+        policy.maxClockSkewMs,
+      )
+    ) {
       reasons.add("SIGNATURE_EXPIRED");
     }
   }
@@ -1636,6 +1655,12 @@ function isExpired(iso: string): boolean {
   const expiresMs = Date.parse(iso);
   if (!Number.isFinite(expiresMs)) return true;
   return Date.now() > expiresMs;
+}
+
+function isExpiredOrWithin(iso: string, safetyMs: number): boolean {
+  const expiresMs = Date.parse(iso);
+  if (!Number.isFinite(expiresMs)) return true;
+  return Date.now() + Math.max(0, safetyMs) >= expiresMs;
 }
 
 function isLockLeaseActive(row: ActionLedgerRow): boolean {
