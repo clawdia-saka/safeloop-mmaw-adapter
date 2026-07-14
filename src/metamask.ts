@@ -136,8 +136,48 @@ export type MmCliRunner = (
   operation: MmCliOperation,
 ) => Promise<{ stdout: string; stderr: string }>;
 
+export type MmCliRunnerOptions = {
+  executable?: string;
+  executableArgs?: string[];
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+};
+
+const DEFAULT_MM_CLI_TIMEOUT_MS = 620_000;
+const DEFAULT_MM_CLI_MAX_OUTPUT_BYTES = 1_000_000;
+
+export function createMmCliRunner(
+  options: MmCliRunnerOptions = {},
+): MmCliRunner {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_MM_CLI_TIMEOUT_MS;
+  const maxOutputBytes =
+    options.maxOutputBytes ?? DEFAULT_MM_CLI_MAX_OUTPUT_BYTES;
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > DEFAULT_MM_CLI_TIMEOUT_MS
+  ) {
+    throw new Error("INVALID_MM_CLI_TIMEOUT");
+  }
+  if (
+    !Number.isSafeInteger(maxOutputBytes) ||
+    maxOutputBytes <= 0 ||
+    maxOutputBytes > DEFAULT_MM_CLI_MAX_OUTPUT_BYTES
+  ) {
+    throw new Error("INVALID_MM_CLI_OUTPUT_LIMIT");
+  }
+
+  return (operation) =>
+    runMmCli(operation, {
+      executable: options.executable ?? operation.command,
+      executableArgs: options.executableArgs ?? [],
+      timeoutMs,
+      maxOutputBytes,
+    });
+}
+
 export function createMmCliSigner(
-  runner: MmCliRunner = runMmCli,
+  runner: MmCliRunner = createMmCliRunner(),
 ): MmawSigner<MmCliOperation, { stdout: string; stderr: string }> {
   return {
     capabilities: {
@@ -391,36 +431,98 @@ function appendOptional(args: string[], flag: string, value?: string): void {
   if (value) args.push(flag, value);
 }
 
-function runMmCli(operation: MmCliOperation): Promise<{
+function runMmCli(
+  operation: MmCliOperation,
+  options: Required<MmCliRunnerOptions>,
+): Promise<{
   stdout: string;
   stderr: string;
 }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(operation.command, operation.args, {
+    const args = [...options.executableArgs, ...operation.args];
+    const child = spawn(options.executable, args, {
       stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
     });
 
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
+    let settled = false;
+
+    const finish = (
+      outcome:
+        | { ok: true; stdout: string; stderr: string }
+        | { ok: false; error: Error },
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (outcome.ok) {
+        resolve({ stdout: outcome.stdout, stderr: outcome.stderr });
+      } else {
+        reject(outcome.error);
+      }
+    };
+
+    const failClosed = (
+      code: "MM_CLI_TIMEOUT" | "MM_CLI_OUTPUT_LIMIT" | `MM_CLI_FAILED:${string}`,
+      includeOutput: boolean,
+    ) => {
+      const packet = sanitizeMetaMaskEvidence({
+        command: `${options.executable} ${args.join(" ")}`,
+        exitCode: null,
+        stdout: includeOutput ? stdout : "",
+        stderr: includeOutput ? stderr : "",
+        invariantViolations: [code],
+        timestamp: new Date().toISOString(),
+        requestId: operation.intent.userGoalId,
+      });
+      const error = new Error(code);
+      (error as { evidence?: MetaMaskEvidencePacket }).evidence = packet;
+      finish({ ok: false, error });
+    };
+
+    const append = (target: "stdout" | "stderr", chunk: string) => {
+      if (settled) return;
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (outputBytes + chunkBytes > options.maxOutputBytes) {
+        child.kill("SIGKILL");
+        failClosed("MM_CLI_OUTPUT_LIMIT", false);
+        return;
+      }
+      outputBytes += chunkBytes;
+      if (target === "stdout") stdout += chunk;
+      else stderr += chunk;
+    };
+
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      failClosed("MM_CLI_TIMEOUT", false);
+    }, options.timeoutMs);
+    timeout.unref?.();
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
+      append("stdout", chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
+      append("stderr", chunk);
     });
-    child.on("error", reject);
+    child.on("error", () => {
+      failClosed("MM_CLI_FAILED:SPAWN", false);
+    });
     child.on("close", (code) => {
+      if (settled) return;
       if (code === 0) {
-        resolve({ stdout, stderr });
+        finish({ ok: true, stdout, stderr });
         return;
       }
       
       // DM-F3: Structured Failure Evidence Packet
       const packet = sanitizeMetaMaskEvidence({
-        command: `${operation.command} ${operation.args.join(" ")}`,
+        command: `${options.executable} ${args.join(" ")}`,
         exitCode: code,
         stdout,
         stderr,
@@ -434,7 +536,7 @@ function runMmCli(operation: MmCliOperation): Promise<{
 
       const error = new Error(`MM_CLI_FAILED:${code ?? "UNKNOWN"}`);
       (error as any).evidence = packet;
-      reject(error);
+      finish({ ok: false, error });
     });
   });
 }

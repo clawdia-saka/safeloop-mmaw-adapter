@@ -293,6 +293,8 @@ Included:
 - MetaMask Agentic CLI `mm` adapter for transfers and swaps
 - MetaMask Agentic CLI `mm perps` adapter for Hyperliquid and HIP-3-style flows
 - MetaMask Agentic CLI helpers for `wallet requests watch` and `tx history`
+- bounded direct-process execution for the legacy `mm` adapter (no shell,
+  finite timeout, capped output, redacted failures)
 
 Not included yet:
 
