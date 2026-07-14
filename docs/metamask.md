@@ -35,7 +35,10 @@ Safeloop expects the MetaMask SDK object to expose two operations:
 
 ```ts
 type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
-  capabilities?: { intentBoundSignatures?: boolean };
+  capabilities?: {
+    intentBoundSignatures?: boolean;
+    nonBroadcastingSignatures?: boolean;
+  };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
   assertSignedOperationMatchesIntent?(params: {
@@ -47,10 +50,11 @@ type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
 ```
 
 Safeloop calls `buildUnsignedOperation`, runs ledger/simulation/invariant checks, and only then calls `sign`.
-The adapter propagates `intentBoundSignatures: true` only when the concrete SDK
-explicitly declares it. The default is untrusted and fails closed. Production
-integrations must also provide the post-sign assertion; the adapter does not
-infer cryptographic binding from an operation shape.
+The adapter propagates signer capabilities only when the concrete SDK
+explicitly declares them. The default is untrusted and fails closed. Production
+integrations must declare both intent-bound and non-broadcasting signing and
+provide the post-sign assertion; the adapter does not infer either property
+from an operation shape.
 
 ## CLI Path
 
@@ -68,9 +72,11 @@ Supported commands in the current prototype:
 - `mm wallet requests watch`
 - `mm tx history`
 
-The CLI adapter builds the `mm` command after intent canonicalization, but execution still passes through `failClosedSign`.
-The generic CLI wrapper does not advertise signer-bound intent protection and
-therefore cannot pass the default production policy by itself.
+The CLI adapter builds the `mm` command after intent canonicalization. Because
+transfer and swap commands may sign and submit in one step, the generic CLI
+wrapper is explicitly incompatible with `failClosedSign`; policy overrides
+cannot bypass that boundary. Use it only behind a separate, transaction-bound
+execution authorization such as ChainPilot's MMAW executor.
 
 Current mapping:
 

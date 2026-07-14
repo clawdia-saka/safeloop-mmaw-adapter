@@ -186,10 +186,16 @@ test("MetaMask helpers advertise intent binding only when explicitly provided", 
     buildUnsignedOperation: async (intent) => ({ intent }),
     sign: async (operation) => operation,
   });
-  assert.equal(unsafeSdkSigner.capabilities, undefined);
+  assert.deepEqual(unsafeSdkSigner.capabilities, {
+    intentBoundSignatures: false,
+    nonBroadcastingSignatures: false,
+  });
 
   const boundSdkSigner = createMetaMaskAgenticSdkSigner({
-    capabilities: { intentBoundSignatures: true },
+    capabilities: {
+      intentBoundSignatures: true,
+      nonBroadcastingSignatures: true,
+    },
     buildUnsignedOperation: async (intent) => ({ intent }),
     sign: async (operation) => operation,
     assertSignedOperationMatchesIntent: ({ intent, signedOperation }) =>
@@ -197,11 +203,15 @@ test("MetaMask helpers advertise intent binding only when explicitly provided", 
   });
   assert.deepEqual(boundSdkSigner.capabilities, {
     intentBoundSignatures: true,
+    nonBroadcastingSignatures: true,
   });
   assert.equal(typeof boundSdkSigner.assertSignedOperationMatchesIntent, "function");
 
   const cliSigner = createMmCliSigner(async () => ({ stdout: "", stderr: "" }));
-  assert.equal(cliSigner.capabilities, undefined);
+  assert.deepEqual(cliSigner.capabilities, {
+    intentBoundSignatures: false,
+    nonBroadcastingSignatures: false,
+  });
 });
 
 test("requires a durable atomic ledger before signing", async () => {
@@ -310,7 +320,10 @@ test("verifies lock ownership immediately before signing", async () => {
         },
         ledger,
         mmaw: {
-          capabilities: { intentBoundSignatures: true },
+          capabilities: {
+            intentBoundSignatures: true,
+            nonBroadcastingSignatures: true,
+          },
           buildUnsignedOperation: async () => ({}),
           sign: async () => {
             signCalled = true;
@@ -392,7 +405,10 @@ test("allows signing when chain is explicitly allowlisted", async () => {
     intent: intentForSigning(),
     ledger,
     mmaw: {
-      capabilities: { intentBoundSignatures: true },
+      capabilities: {
+        intentBoundSignatures: true,
+        nonBroadcastingSignatures: true,
+      },
       buildUnsignedOperation: async (intent) => ({ intent }),
       sign: async () => signedOperation,
       assertSignedOperationMatchesIntent: async ({ intent, unsignedOperation }) =>
@@ -426,7 +442,10 @@ test("post-sign assertion mismatch runs cleanup before failing closed", async ()
         intent: intentForSigning(),
         ledger,
         mmaw: {
-          capabilities: { intentBoundSignatures: true },
+          capabilities: {
+            intentBoundSignatures: true,
+            nonBroadcastingSignatures: true,
+          },
           buildUnsignedOperation: async (intent) => ({ intent }),
           sign: async () => ({ chainId: 999 }),
           assertSignedOperationMatchesIntent: async ({ intent, signedOperation }) =>
@@ -459,7 +478,10 @@ test("post-sign assertion cleanup failure leaves cleanup-required reason", async
         intent: intentForSigning(),
         ledger,
         mmaw: {
-          capabilities: { intentBoundSignatures: true },
+          capabilities: {
+            intentBoundSignatures: true,
+            nonBroadcastingSignatures: true,
+          },
           buildUnsignedOperation: async (intent) => ({ intent }),
           sign: async () => ({ chainId: 999 }),
           assertSignedOperationMatchesIntent: async () => false,
@@ -734,6 +756,30 @@ test("rejects long-lived ghost transaction signatures", () => {
   });
 
   assert.ok(reasons.includes("SIGNATURE_EXPIRY_REQUIRED"));
+});
+
+test("treats signatures inside the clock-skew window as expired", () => {
+  const current = row({
+    actionType: "swap",
+    assetIn: "eth",
+    assetOut: "usdc",
+    amountIn: "1",
+  });
+
+  const reasons = checkTrajectoryInvariants({
+    current,
+    history: [],
+    simulation: {
+      ...baseSimulation,
+      signatureExpiresAt: new Date(Date.now() + 100).toISOString(),
+    },
+    policy: {
+      ...defaultPolicy,
+      maxClockSkewMs: 250,
+    },
+  });
+
+  assert.ok(reasons.includes("SIGNATURE_EXPIRED"));
 });
 
 test("locks account-wide perps risk across HIP-3 builder DEX scopes", () => {
@@ -2316,9 +2362,107 @@ test("signer intent binding cannot be bypassed by disabling durable ledger polic
   );
 });
 
+test("sign-and-submit CLI cannot bypass the non-broadcasting boundary", async () => {
+  const ledger = makeSigningLedger();
+  let runnerCalled = false;
+  const cli = createMmCliSigner(async () => {
+    runnerCalled = true;
+    return { stdout: "", stderr: "" };
+  });
+
+  await assert.rejects(
+    () => failClosedSign({
+      intent: intentForSigning(),
+      ledger,
+      mmaw: cli,
+      simulator: { simulate: async () => baseSimulation },
+      policy: {
+        requireSignerIntentBinding: false,
+        requirePostSignIntentAssertion: false,
+        supportedChainIds: [1],
+      },
+    }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("NON_BROADCASTING_SIGNER_REQUIRED"),
+  );
+
+  assert.equal(runnerCalled, false);
+  assert.deepEqual(ledger.statuses, []);
+});
+
+test("rechecks timestamp expiry immediately before signing", async () => {
+  let verifyCalls = 0;
+  let signCalled = false;
+  const ledger = makeSigningLedger({
+    verifyLock: async () => {
+      verifyCalls += 1;
+      if (verifyCalls === 2) {
+        await new Promise((resolve) => setTimeout(resolve, 75));
+      }
+      return true;
+    },
+  });
+
+  await assert.rejects(
+    () => failClosedSign({
+      intent: intentForSigning(),
+      ledger,
+      mmaw: {
+        capabilities: {
+          intentBoundSignatures: true,
+          nonBroadcastingSignatures: true,
+        },
+        buildUnsignedOperation: async (intent) => ({ intent }),
+        sign: async () => {
+          signCalled = true;
+          return {};
+        },
+        assertSignedOperationMatchesIntent: async () => true,
+      },
+      simulator: {
+        simulate: async () => ({
+          ...baseSimulation,
+          signatureExpiresAt: new Date(Date.now() + 50).toISOString(),
+        }),
+      },
+      policy: {
+        supportedChainIds: [1],
+        maxClockSkewMs: 10,
+        maxSignatureTtlMs: 1_000,
+      },
+    }),
+    (error) =>
+      error instanceof SafeloopAbort &&
+      error.reasonCodes.includes("SIGNATURE_EXPIRED"),
+  );
+
+  assert.equal(signCalled, false);
+  assert.deepEqual(ledger.statuses.at(-1).reasonCodes, ["SIGNATURE_EXPIRED"]);
+  assert.equal(ledger.statuses.at(-1).status, "ABORTED");
+});
+
+test("CLI runner errors never rethrow raw credential-bearing diagnostics", async () => {
+  const signer = createMmCliSigner(async () => {
+    throw new Error("Bearer raw-cli-secret-value");
+  });
+  const operation = await signer.buildUnsignedOperation(intentForSigning());
+
+  await assert.rejects(
+    () => signer.sign(operation),
+    (error) =>
+      error instanceof Error &&
+      error.message === "MM_CLI_FAILED_REDACTED" &&
+      !error.message.includes("raw-cli-secret"),
+  );
+});
+
 test("SDK signer errors never rethrow raw credential-bearing diagnostics", async () => {
   const signer = createMetaMaskAgenticSdkSigner({
-    capabilities: { intentBoundSignatures: true },
+    capabilities: {
+      intentBoundSignatures: true,
+      nonBroadcastingSignatures: true,
+    },
     buildUnsignedOperation: async (intent) => ({ intent }),
     sign: async () => { throw new Error("Bearer raw-secret-value"); },
     assertSignedOperationMatchesIntent: async () => true,

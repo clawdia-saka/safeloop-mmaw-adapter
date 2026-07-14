@@ -68,6 +68,7 @@ export function verifyIntentTrajectory(intent: CanonicalIntent): void {
 export type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
   capabilities?: {
     intentBoundSignatures?: boolean;
+    nonBroadcastingSignatures?: boolean;
   };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
   sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
@@ -84,9 +85,12 @@ export function createMetaMaskAgenticSdkSigner<
   sdk: MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation>,
 ): MmawSigner<TUnsignedOperation, TSignedOperation> {
   return {
-    capabilities: sdk.capabilities?.intentBoundSignatures
-      ? { intentBoundSignatures: true }
-      : undefined,
+    capabilities: {
+      intentBoundSignatures:
+        sdk.capabilities?.intentBoundSignatures === true,
+      nonBroadcastingSignatures:
+        sdk.capabilities?.nonBroadcastingSignatures === true,
+    },
     buildUnsignedOperation: (intent) => sdk.buildUnsignedOperation(intent),
     sign: async (operation: TUnsignedOperation) => {
       // DM-F1: Interceptor for SDK
@@ -136,6 +140,10 @@ export function createMmCliSigner(
   runner: MmCliRunner = runMmCli,
 ): MmawSigner<MmCliOperation, { stdout: string; stderr: string }> {
   return {
+    capabilities: {
+      intentBoundSignatures: false,
+      nonBroadcastingSignatures: false,
+    },
     async buildUnsignedOperation(intent) {
       return {
         command: "mm",
@@ -146,7 +154,29 @@ export function createMmCliSigner(
     sign: async (operation) => {
       // DM-F1: Interceptor for CLI
       verifyIntentTrajectory(operation.intent);
-      return await runner(operation);
+      try {
+        return await runner(operation);
+      } catch (error) {
+        const existingEvidence =
+          error && typeof error === "object" && "evidence" in error
+            ? (error as { evidence?: MetaMaskEvidencePacket }).evidence
+            : undefined;
+        const packet = existingEvidence ?? sanitizeMetaMaskEvidence({
+          command: `${operation.command} ${operation.args.join(" ")}`,
+          exitCode: null,
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+          invariantViolations: [],
+          timestamp: new Date().toISOString(),
+          requestId: operation.intent.userGoalId,
+        });
+        if (!existingEvidence) {
+          console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
+        }
+        const wrapped = new Error("MM_CLI_FAILED_REDACTED");
+        (wrapped as { evidence?: MetaMaskEvidencePacket }).evidence = packet;
+        throw wrapped;
+      }
     },
   };
 }
@@ -402,7 +432,7 @@ function runMmCli(operation: MmCliOperation): Promise<{
       // Fire-and-forget audit log (simulated)
       console.error("AUDIT_LOG_PACKET", JSON.stringify(packet));
 
-      const error = new Error(`MM_CLI_FAILED:${code}:${stderr}`);
+      const error = new Error(`MM_CLI_FAILED:${code ?? "UNKNOWN"}`);
       (error as any).evidence = packet;
       reject(error);
     });

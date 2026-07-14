@@ -243,7 +243,9 @@ Safeloop calls them in order. If any result is failed or unknown, signing stops.
 The signer must be non-broadcasting at `sign()` time. If post-sign assertion
 fails, Safeloop marks the action failed and asks the ledger to release or
 invalidate reserved nonce, gas, lock, and fencing resources before the next
-intent can proceed.
+intent can proceed. Integrations must explicitly advertise
+`nonBroadcastingSignatures: true`; unknown or sign-and-submit adapters are
+rejected before ledger mutation.
 
 ## Current Status
 

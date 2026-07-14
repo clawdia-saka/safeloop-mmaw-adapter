@@ -9,6 +9,7 @@ const REASON_DESCRIPTIONS: Record<string, string> = {
   "NAV_DELTA_LIMIT": "DM-F5 (NAV Delta Limit) exceeded. Post-simulation NAV loss exceeds percentage threshold.",
   "SIGNED_OPERATION_ASSERTION_REQUIRED": "DM-F6 (PII Security Breach) risk. Post-sign assertion must be enabled to prevent PII leaks.",
   "SIGNED_OPERATION_INTENT_MISMATCH": "DM-F7 (Post-Sign Intent Mismatch) detected. Signed transaction payload does not match canonical intent.",
+  "NON_BROADCASTING_SIGNER_REQUIRED": "Signing boundary is unsafe. The signer must return a signed payload without broadcasting it.",
   "BROADCASTING_TIMEOUT": "DM-S1 (Broadcasting Timeout). Transaction submitted but not landed within expected window.",
   "BROADCAST_TRACKING_EXPIRED": "DM-S2 (Broadcast Tracking Expired). Unable to verify finality of submitted transaction.",
   "STALE_RECONCILIATION": "DM-S3 (Stale Reconciliation). On-chain state observation is older than max age policy.",

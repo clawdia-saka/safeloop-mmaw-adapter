@@ -227,7 +227,13 @@ valid intent does not silently inherit stale reservations.
 
 `sign()` integrations are expected to return a signed payload without
 broadcasting it. A signer that signs and broadcasts in one step cannot provide a
-safe post-sign assertion boundary.
+safe post-sign assertion boundary. This is enforced through the explicit
+`nonBroadcastingSignatures` capability; missing or false capability fails
+closed before ledger mutation or signing.
+
+Timestamp-based signature expiry also reserves the configured clock-skew
+window. An operation inside that window is treated as expired rather than
+racing the signer or remote wallet clock.
 
 ### Chain Allowlist
 
