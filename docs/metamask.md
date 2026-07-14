@@ -16,16 +16,10 @@ await failClosedSign({
 });
 ```
 
-or:
-
-```ts
-await failClosedSign({
-  intent,
-  ledger,
-  simulator,
-  mmaw: createMmCliSigner(),
-});
-```
+The generic `createMmCliSigner` adapter is deliberately **not** a second
+`failClosedSign` example. Current `mm` transfer and swap commands can sign and
+submit in one step, so the adapter advertises neither non-broadcasting nor
+intent-bound signing and the gate rejects it before ledger mutation.
 
 ## SDK Path
 
@@ -77,6 +71,14 @@ transfer and swap commands may sign and submit in one step, the generic CLI
 wrapper is explicitly incompatible with `failClosedSign`; policy overrides
 cannot bypass that boundary. Use it only behind a separate, transaction-bound
 execution authorization such as ChainPilot's MMAW executor.
+
+The default runner invokes `mm` directly without a shell, caps combined
+stdout/stderr at 1,000,000 bytes, and terminates the child after 620 seconds.
+Timeout, output overflow, spawn failure, and non-zero exit are surfaced to the
+signer only through sanitized evidence and the stable
+`MM_CLI_FAILED_REDACTED` caller error. Tests can inject an executable, prefix
+arguments, and tighter limits through `createMmCliRunner`; production callers
+normally use the defaults.
 
 Current mapping:
 

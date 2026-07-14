@@ -1,9 +1,11 @@
-# MMAW non-broadcasting signer boundary
+# MMAW signer and CLI process boundary
 
 ## Goal
 
 Make the documented `sign()`-without-broadcasting requirement an enforced,
-fail-closed runtime contract.
+fail-closed runtime contract, including bounded execution of the legacy `mm`
+sign-and-submit adapter when it is used behind a separate transaction-bound
+authorization.
 
 ## Capability
 
@@ -16,6 +18,11 @@ fail-closed runtime contract.
   signing so a slow simulation, history read, or lock verification cannot use
   an expired authorization.
 - CLI and SDK failures never rethrow raw external diagnostics.
+- The default `mm` process runner has a finite timeout and bounded stdout/stderr
+  capture. Timeout or output overflow kills the child and returns only a
+  redacted failure to callers.
+- Documentation must not show the sign-and-submit CLI adapter as a valid
+  `failClosedSign` signer.
 
 ## Regression
 
@@ -24,6 +31,8 @@ fail-closed runtime contract.
 - Typecheck and build pass.
 - The default policy remains fail-closed and no CLI command is executed by the
   new rejection tests.
+- Bounded-process regressions cover success, timeout, output overflow, and
+  secret-bearing stderr without invoking a real wallet command.
 
 ## Non-goals
 

@@ -21,6 +21,7 @@ import {
   buildTxHistoryArgs,
   buildWalletRequestsWatchArgs,
   createMetaMaskAgenticSdkSigner,
+  createMmCliRunner,
   createMmCliSigner,
 } from "../dist/metamask.js";
 
@@ -2454,6 +2455,98 @@ test("CLI runner errors never rethrow raw credential-bearing diagnostics", async
       error instanceof Error &&
       error.message === "MM_CLI_FAILED_REDACTED" &&
       !error.message.includes("raw-cli-secret"),
+  );
+});
+
+test("default CLI process runner returns bounded successful output", async () => {
+  const signer = createMmCliSigner(createMmCliRunner({
+    executable: process.execPath,
+    executableArgs: [
+      "-e",
+      'process.stdout.write("ok"); process.stderr.write("warn");',
+    ],
+    timeoutMs: 1_000,
+    maxOutputBytes: 64,
+  }));
+  const operation = await signer.buildUnsignedOperation(intentForSigning());
+
+  assert.deepEqual(await signer.sign(operation), {
+    stdout: "ok",
+    stderr: "warn",
+  });
+});
+
+test("CLI process runner options cannot weaken the default bounds", () => {
+  assert.throws(
+    () => createMmCliRunner({ timeoutMs: 620_001 }),
+    /INVALID_MM_CLI_TIMEOUT/,
+  );
+  assert.throws(
+    () => createMmCliRunner({ maxOutputBytes: 1_000_001 }),
+    /INVALID_MM_CLI_OUTPUT_LIMIT/,
+  );
+});
+
+test("default CLI process runner kills timed out commands without leaking output", async () => {
+  const signer = createMmCliSigner(createMmCliRunner({
+    executable: process.execPath,
+    executableArgs: [
+      "-e",
+      'process.stderr.write("Bearer timeout-secret-value"); setInterval(() => {}, 1_000);',
+    ],
+    timeoutMs: 50,
+    maxOutputBytes: 1_000,
+  }));
+  const operation = await signer.buildUnsignedOperation(intentForSigning());
+
+  await assert.rejects(
+    () => signer.sign(operation),
+    (error) =>
+      error instanceof Error &&
+      error.message === "MM_CLI_FAILED_REDACTED" &&
+      !JSON.stringify(error).includes("timeout-secret-value"),
+  );
+});
+
+test("default CLI process runner kills output overflow without retaining the overflow", async () => {
+  const signer = createMmCliSigner(createMmCliRunner({
+    executable: process.execPath,
+    executableArgs: [
+      "-e",
+      'process.stdout.write("Bearer output-secret-value".repeat(20));',
+    ],
+    timeoutMs: 1_000,
+    maxOutputBytes: 32,
+  }));
+  const operation = await signer.buildUnsignedOperation(intentForSigning());
+
+  await assert.rejects(
+    () => signer.sign(operation),
+    (error) =>
+      error instanceof Error &&
+      error.message === "MM_CLI_FAILED_REDACTED" &&
+      !JSON.stringify(error).includes("output-secret-value"),
+  );
+});
+
+test("default CLI process runner redacts bounded stderr on non-zero exit", async () => {
+  const signer = createMmCliSigner(createMmCliRunner({
+    executable: process.execPath,
+    executableArgs: [
+      "-e",
+      'process.stderr.write("Bearer stderr-secret-value"); process.exitCode = 7;',
+    ],
+    timeoutMs: 1_000,
+    maxOutputBytes: 1_000,
+  }));
+  const operation = await signer.buildUnsignedOperation(intentForSigning());
+
+  await assert.rejects(
+    () => signer.sign(operation),
+    (error) =>
+      error instanceof Error &&
+      error.message === "MM_CLI_FAILED_REDACTED" &&
+      !JSON.stringify(error).includes("stderr-secret-value"),
   );
 });
 
