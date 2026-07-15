@@ -8,6 +8,8 @@ export * from "./reconciliation.js";
 export * from "./hyperliquid.js";
 export * from "./evidence.js";
 export * from "./tracer.js";
+export * from "./simulators.js";
+export * from "./readiness.js";
 
 export type ActionType =
   | "swap"
@@ -72,6 +74,10 @@ export type AbortReason =
   | "LOCK_LEASE_EXPIRED"
   | "LOCK_OWNERSHIP_REQUIRED"
   | "LOCK_OWNERSHIP_LOST"
+  | "OWNER_BOUND_STATUS_WRITE_REQUIRED"
+  | "ABORTABLE_SIGNER_REQUIRED"
+  | "SIGNING_TIMEOUT"
+  | "SIGNER_ABORT_UNACKNOWLEDGED"
   | "ACCOUNT_LOCK_REQUIRED"
   | "GLOBAL_COLLATERAL_LOCK_REQUIRED"
   | "GLOBAL_COLLATERAL_LOCK_CONTENTION"
@@ -85,6 +91,10 @@ export type AbortReason =
   | "SIGNER_INTENT_BINDING_REQUIRED"
   | "SIGNED_OPERATION_ASSERTION_REQUIRED"
   | "SIGNED_OPERATION_INTENT_MISMATCH"
+  | "INTENT_SNAPSHOT_REQUIRED"
+  | "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED"
+  | "SIGNED_OPERATION_SNAPSHOT_REQUIRED"
+  | "SIMULATION_SNAPSHOT_REQUIRED"
   | "NON_BROADCASTING_SIGNER_REQUIRED"
   | "POST_SIGN_CLEANUP_REQUIRED"
   | "INTENT_LOCK_REQUIRED"
@@ -292,19 +302,32 @@ export type Ledger = {
     priorityLocks?: boolean;
     preemptionCancellation?: boolean;
     lockFencing?: boolean;
+    ownerBoundStatusWrites?: boolean;
   };
   tryLock(row: ActionLedgerRow): Promise<boolean>;
   verifyLock?(row: ActionLedgerRow): Promise<boolean>;
+  syncAction?(row: ActionLedgerRow): Promise<boolean>;
+  renewLock?(row: ActionLedgerRow): Promise<boolean>;
   markStatus(
     intentId: string,
     status: LedgerStatus,
     reasonCodes?: AbortReason[],
   ): Promise<void>;
+  markStatusOwned?(
+    row: ActionLedgerRow,
+    status: LedgerStatus,
+    reasonCodes?: AbortReason[],
+  ): Promise<boolean>;
+  releaseOwnedLocks?(row: ActionLedgerRow): Promise<boolean>;
   cleanupPostSignFailure?(params: {
     row: ActionLedgerRow;
     reasonCodes: AbortReason[];
     signedOperation: unknown;
-  }): Promise<{ ok: boolean; reasonCodes?: AbortReason[] } | void>;
+  }): Promise<{
+    ok: boolean;
+    statusPersisted?: boolean;
+    reasonCodes?: AbortReason[];
+  } | void>;
   recentForWallet(params: {
     wallet: string;
     chainId?: number;
@@ -316,9 +339,14 @@ export type MmawSigner<TUnsignedOperation, TSignedOperation> = {
   capabilities?: {
     intentBoundSignatures?: boolean;
     nonBroadcastingSignatures?: boolean;
+    expiringSignatures?: boolean;
+    abortableSignatures?: boolean;
   };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
-  sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
+  sign(
+    operation: TUnsignedOperation,
+    options?: { signal: AbortSignal },
+  ): Promise<TSignedOperation>;
   assertSignedOperationMatchesIntent?(params: {
     intent: CanonicalIntent;
     unsignedOperation: TUnsignedOperation;
@@ -459,6 +487,7 @@ export function canonicalizeIntent(
   intent: AgentIntent,
   now = new Date(),
 ): CanonicalIntent {
+  validateIntentIngress(intent);
   const timeBucket = bucketIso(now, 15);
 
   return {
@@ -614,6 +643,13 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   if (!params.mmaw.capabilities?.nonBroadcastingSignatures) {
     preflightReasons.push("NON_BROADCASTING_SIGNER_REQUIRED");
   }
+  if (
+    policy.requireDurableLedger &&
+    policy.requireExpiringSignatures &&
+    !params.mmaw.capabilities?.expiringSignatures
+  ) {
+    preflightReasons.push("SIGNATURE_EXPIRY_REQUIRED");
+  }
 
   if (policy.requireDurableLedger) {
     if (!params.ledger.capabilities?.durable) {
@@ -628,7 +664,19 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     if (!params.ledger.capabilities?.ownedLocks || !params.ledger.verifyLock) {
       preflightReasons.push("LOCK_OWNERSHIP_REQUIRED");
     }
-    if (!params.ledger.capabilities?.lockLeaseRenewal) {
+    if (
+      params.ledger.capabilities?.ownerBoundStatusWrites !== true ||
+      typeof params.ledger.markStatusOwned !== "function"
+    ) {
+      preflightReasons.push("OWNER_BOUND_STATUS_WRITE_REQUIRED");
+    }
+    if (typeof params.ledger.releaseOwnedLocks !== "function") {
+      preflightReasons.push("PARTIAL_LOCK_RELEASE_REQUIRED");
+    }
+    if (
+      !params.ledger.capabilities?.lockLeaseRenewal ||
+      typeof params.ledger.renewLock !== "function"
+    ) {
       preflightReasons.push("LOCK_LEASE_EXTENSION_REQUIRED");
     }
     if (!params.ledger.capabilities?.inFlightGasAccounting) {
@@ -669,6 +717,12 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
     }
   }
   if (
+    policy.requireDurableLedger &&
+    params.mmaw.capabilities?.abortableSignatures !== true
+  ) {
+    preflightReasons.push("ABORTABLE_SIGNER_REQUIRED");
+  }
+  if (
     policy.requireSignerIntentBinding &&
     !params.mmaw.capabilities?.intentBoundSignatures
   ) {
@@ -696,43 +750,78 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
 
   const locked = await params.ledger.tryLock(row);
   if (!locked) {
-    await params.ledger.markStatus(intentId, "ABORTED", [
-      "LEDGER_LOCK_CONFLICT",
-      "INTENT_LOCK_REQUIRED",
-    ]);
     throw new SafeloopAbort(["LEDGER_LOCK_CONFLICT", "INTENT_LOCK_REQUIRED"]);
   }
 
   let unsignedOperation: TUnsignedOperation;
   let simulation: SimulationResult;
   try {
-    unsignedOperation = await params.mmaw.buildUnsignedOperation(canonicalIntent);
-    simulation = await params.simulator.simulate(
-      unsignedOperation,
-      canonicalIntent,
+    const builtOperation =
+      await params.mmaw.buildUnsignedOperation(
+        policy.requireDurableLedger
+          ? cloneBoundaryValue(canonicalIntent, "INTENT_SNAPSHOT_REQUIRED")
+          : canonicalIntent,
+      );
+    unsignedOperation = policy.requireDurableLedger
+      ? cloneBoundaryValue(
+          builtOperation,
+          "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED",
+        )
+      : builtOperation;
+    const simulationOperation = policy.requireDurableLedger
+      ? cloneBoundaryValue(
+          unsignedOperation,
+          "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED",
+        )
+      : unsignedOperation;
+    const rawSimulation = await params.simulator.simulate(
+      simulationOperation,
+      policy.requireDurableLedger
+        ? cloneBoundaryValue(canonicalIntent, "INTENT_SNAPSHOT_REQUIRED")
+        : canonicalIntent,
     );
+    simulation = policy.requireDurableLedger
+      ? cloneBoundaryValue(rawSimulation, "SIMULATION_SNAPSHOT_REQUIRED")
+      : rawSimulation;
   } catch (error) {
-    await params.ledger.markStatus(intentId, "ABORTED", [
+    await markTerminalBeforeSign(params.ledger, row, "ABORTED", [
       "SIMULATION_UNAVAILABLE",
     ]);
     throw error;
   }
   row.signatureExpiresAt = simulation.signatureExpiresAt;
+  if (
+    params.ledger.syncAction &&
+    !(await runPreSignStep(params.ledger, row, () =>
+      params.ledger.syncAction!(row),
+    ))
+  ) {
+    await markTerminalBeforeSign(params.ledger, row, "ABORTED", [
+      "LOCK_OWNERSHIP_LOST",
+    ]);
+    throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
+  }
 
-  await params.ledger.markStatus(intentId, "SIMULATED");
+  await runPreSignStep(params.ledger, row, () =>
+    markOwnedStatus(params.ledger, row, "SIMULATED"),
+  );
 
-  const history = await params.ledger.recentForWallet({
-    wallet: canonicalIntent.wallet,
-    chainId: canonicalIntent.chainId,
-    lookbackMinutes: policy.trajectoryLookbackMinutes,
-  });
+  const history = await runPreSignStep(params.ledger, row, () =>
+    params.ledger.recentForWallet({
+      wallet: canonicalIntent.wallet,
+      chainId: canonicalIntent.chainId,
+      lookbackMinutes: policy.trajectoryLookbackMinutes,
+    }),
+  );
 
-  const reasonCodes = checkTrajectoryInvariants({
-    current: row,
-    history,
-    simulation,
-    policy,
-  });
+  const reasonCodes = await runPreSignStep(params.ledger, row, async () =>
+    checkTrajectoryInvariants({
+      current: row,
+      history,
+      simulation,
+      policy,
+    }),
+  );
 
   const envelope: SafetyEnvelope<TUnsignedOperation> = {
     intentId,
@@ -747,86 +836,489 @@ export async function failClosedSign<TUnsignedOperation, TSignedOperation>(
   };
 
   if (!envelope.decision.allow) {
-    await params.ledger.markStatus(intentId, "ABORTED", reasonCodes);
+    await markTerminalBeforeSign(
+      params.ledger,
+      row,
+      "ABORTED",
+      reasonCodes,
+    );
     throw new SafeloopAbort(reasonCodes);
   }
 
-  await params.ledger.markStatus(intentId, "APPROVED_FOR_SIGNING");
-  await verifyActiveLockOwnership(params.ledger, row);
-  await params.ledger.markStatus(intentId, "SIGNING");
-  await verifyActiveLockOwnership(params.ledger, row);
+  await runPreSignStep(params.ledger, row, () =>
+    markOwnedStatus(params.ledger, row, "APPROVED_FOR_SIGNING"),
+  );
+  await runPreSignStep(params.ledger, row, () =>
+    verifyActiveLockOwnership(params.ledger, row),
+  );
+  await runPreSignStep(params.ledger, row, () =>
+    markOwnedStatus(params.ledger, row, "SIGNING"),
+  );
+  await runPreSignStep(params.ledger, row, () =>
+    verifyActiveLockOwnership(params.ledger, row),
+  );
 
   if (
     row.signatureExpiresAt &&
     isExpiredOrWithin(row.signatureExpiresAt, policy.maxClockSkewMs)
   ) {
-    await params.ledger.markStatus(intentId, "ABORTED", ["SIGNATURE_EXPIRED"]);
+    await markTerminalBeforeSign(params.ledger, row, "ABORTED", [
+      "SIGNATURE_EXPIRED",
+    ]);
     throw new SafeloopAbort(["SIGNATURE_EXPIRED"]);
   }
 
+  let signedProduced = false;
+  let cleanupPayload: unknown;
   try {
-    const signed = await params.mmaw.sign(unsignedOperation);
+    if (policy.requireDurableLedger && !(await params.ledger.renewLock?.(row))) {
+      throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
+    }
+    const signingOperation = policy.requireDurableLedger
+      ? cloneBoundaryValue(
+          unsignedOperation,
+          "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED",
+        )
+      : unsignedOperation;
+    const signResult = policy.requireDurableLedger
+      ? await signWithDeadline(params.mmaw, signingOperation, row, policy)
+      : { signedOperation: await params.mmaw.sign(signingOperation), timedOut: false };
+    const rawSigned = signResult.signedOperation;
+    signedProduced = true;
+    cleanupPayload = rawSigned;
+    if (signResult.timedOut) {
+      throw new SafeloopAbort(["SIGNING_TIMEOUT"]);
+    }
+    const signed = policy.requireDurableLedger
+      ? cloneBoundaryValue(rawSigned, "SIGNED_OPERATION_SNAPSHOT_REQUIRED")
+      : rawSigned;
+    cleanupPayload = signed;
+    await verifyActiveLockOwnership(params.ledger, row);
     if (policy.requirePostSignIntentAssertion) {
+      const assertionSigned = policy.requireDurableLedger
+        ? cloneBoundaryValue(signed, "SIGNED_OPERATION_SNAPSHOT_REQUIRED")
+        : signed;
+      const assertionUnsigned = policy.requireDurableLedger
+        ? cloneBoundaryValue(
+            unsignedOperation,
+            "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED",
+          )
+        : unsignedOperation;
       const matchesIntent =
         await params.mmaw.assertSignedOperationMatchesIntent?.({
-          intent: canonicalIntent,
-          unsignedOperation,
-          signedOperation: signed,
+          intent: policy.requireDurableLedger
+            ? cloneBoundaryValue(canonicalIntent, "INTENT_SNAPSHOT_REQUIRED")
+            : canonicalIntent,
+          unsignedOperation: assertionUnsigned,
+          signedOperation: assertionSigned,
         });
       if (!matchesIntent) {
-        const reasonCodes = await cleanupAfterPostSignMismatch({
-          ledger: params.ledger,
-          row,
-          signedOperation: signed,
-        });
-        throw new SafeloopAbort(reasonCodes);
+        throw new SafeloopAbort(["SIGNED_OPERATION_INTENT_MISMATCH"]);
       }
     }
-    await params.ledger.markStatus(intentId, "SIGNED");
+    await verifyActiveLockOwnership(params.ledger, row);
+    if (
+      row.signatureExpiresAt &&
+      isExpiredOrWithin(row.signatureExpiresAt, policy.maxClockSkewMs)
+    ) {
+      throw new SafeloopAbort(["SIGNATURE_EXPIRED"]);
+    }
+    await markOwnedStatus(params.ledger, row, "SIGNED");
     return signed;
   } catch (error) {
+    if (signedProduced) {
+      const initialReasons =
+        error instanceof SafeloopAbort
+          ? error.reasonCodes
+          : (["UNKNOWN_STATE"] as AbortReason[]);
+      const reasonCodes = await cleanupAfterSignedFailure({
+        ledger: params.ledger,
+        row,
+        signedOperation: cleanupPayload,
+        initialReasons,
+      });
+      throw new SafeloopAbort(reasonCodes);
+    }
     if (
       error instanceof SafeloopAbort &&
-      error.reasonCodes.includes("SIGNED_OPERATION_INTENT_MISMATCH")
+      error.reasonCodes.includes("SIGNER_ABORT_UNACKNOWLEDGED")
     ) {
+      // Do not release an owner/fence while the trusted signer has not
+      // acknowledged cancellation: it may still produce an externally usable
+      // signature. The durable SIGNING shadow requires reconciliation.
       throw error;
     }
-    await params.ledger.markStatus(intentId, "SIGN_FAILED", ["UNKNOWN_STATE"]);
+    await markTerminalBeforeSign(
+      params.ledger,
+      row,
+      "SIGN_FAILED",
+      error instanceof SafeloopAbort
+        ? error.reasonCodes
+        : ["UNKNOWN_STATE"],
+    );
     throw error;
   }
 }
 
-async function cleanupAfterPostSignMismatch(params: {
+async function markOwnedStatus(
+  ledger: Ledger,
+  row: ActionLedgerRow,
+  status: LedgerStatus,
+  reasonCodes: AbortReason[] = [],
+): Promise<void> {
+  if (ledger.markStatusOwned) {
+    const updated = await ledger.markStatusOwned(row, status, reasonCodes);
+    if (!updated) throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
+    row.status = status;
+    row.reasonCodes = [...new Set(reasonCodes)];
+    return;
+  }
+  await ledger.markStatus(row.intentId, status, reasonCodes);
+  row.status = status;
+  row.reasonCodes = [...new Set(reasonCodes)];
+}
+
+async function markTerminalBeforeSign(
+  ledger: Ledger,
+  row: ActionLedgerRow,
+  status: Extract<LedgerStatus, "ABORTED" | "SIGN_FAILED">,
+  reasonCodes: AbortReason[],
+): Promise<void> {
+  let statusError: unknown;
+  try {
+    await markOwnedStatus(ledger, row, status, reasonCodes);
+  } catch (error) {
+    statusError = error;
+  }
+  let released = true;
+  try {
+    released = !!ledger.releaseOwnedLocks && await ledger.releaseOwnedLocks(row);
+  } catch {
+    released = false;
+  }
+  if (statusError) throw statusError;
+  if (!released) {
+    throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
+  }
+}
+
+async function runPreSignStep<T>(
+  ledger: Ledger,
+  row: ActionLedgerRow,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    try {
+      await markTerminalBeforeSign(ledger, row, "ABORTED", [
+        error instanceof SafeloopAbort
+          ? error.reasonCodes[0] ?? "UNKNOWN_STATE"
+          : "UNKNOWN_STATE",
+      ]);
+    } catch {
+      // Preserve the triggering failure. markTerminalBeforeSign already made
+      // a best-effort owner/fence-bound release even when status persistence
+      // failed.
+    }
+    throw error;
+  }
+}
+
+async function signWithDeadline<TUnsignedOperation, TSignedOperation>(
+  signer: MmawSigner<TUnsignedOperation, TSignedOperation>,
+  operation: TUnsignedOperation,
+  row: ActionLedgerRow,
+  policy: SafeloopPolicy,
+): Promise<{ signedOperation: TSignedOperation; timedOut: boolean }> {
+  const expiryBudget = row.signatureExpiresAt
+    ? Date.parse(row.signatureExpiresAt) - Date.now() - policy.maxClockSkewMs
+    : policy.maxSignatureTtlMs;
+  const leaseBudget = row.lockedUntil
+    ? Date.parse(row.lockedUntil) - Date.now() - policy.maxClockSkewMs
+    : Number.NaN;
+  const timeoutMs = Math.min(
+    expiryBudget,
+    leaseBudget,
+    policy.maxSignatureTtlMs,
+  );
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new SafeloopAbort(["SIGNING_TIMEOUT"]);
+  }
+
+  const controller = new AbortController();
+  const signing = signer.sign(operation, { signal: controller.signal }).then(
+    (signedOperation) => ({ ok: true as const, signedOperation }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<{ deadline: true }>((resolve) => {
+    deadlineTimer = setTimeout(() => resolve({ deadline: true }), timeoutMs);
+  });
+  const first = await Promise.race([signing, deadline]);
+  if (!("deadline" in first)) {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (!first.ok) throw first.error;
+    return { signedOperation: first.signedOperation, timedOut: false };
+  }
+
+  controller.abort();
+  const acknowledgementMs = Math.max(
+    1,
+    Math.min(policy.maxClockSkewMs, 250),
+  );
+  let acknowledgementTimer: ReturnType<typeof setTimeout> | undefined;
+  const acknowledgementDeadline = new Promise<{ unacknowledged: true }>(
+    (resolve) => {
+      acknowledgementTimer = setTimeout(
+        () => resolve({ unacknowledged: true }),
+        acknowledgementMs,
+      );
+    },
+  );
+  const acknowledged = await Promise.race([signing, acknowledgementDeadline]);
+  if ("unacknowledged" in acknowledged) {
+    throw new SafeloopAbort(["SIGNER_ABORT_UNACKNOWLEDGED"]);
+  }
+  if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
+  if (!acknowledged.ok) throw new SafeloopAbort(["SIGNING_TIMEOUT"]);
+  return { signedOperation: acknowledged.signedOperation, timedOut: true };
+}
+
+async function cleanupAfterSignedFailure(params: {
   ledger: Ledger;
   row: ActionLedgerRow;
   signedOperation: unknown;
+  initialReasons: AbortReason[];
 }): Promise<AbortReason[]> {
-  const reasonCodes: AbortReason[] = ["SIGNED_OPERATION_INTENT_MISMATCH"];
+  const reasonCodes = new Set<AbortReason>(params.initialReasons);
 
   try {
-    const cleanupResult = await params.ledger.cleanupPostSignFailure?.({
-      row: params.row,
-      signedOperation: params.signedOperation,
-      reasonCodes,
-    });
-    if (cleanupResult && !cleanupResult.ok) {
-      reasonCodes.push("POST_SIGN_CLEANUP_REQUIRED");
-      for (const reason of cleanupResult.reasonCodes ?? []) {
-        reasonCodes.push(reason);
+    if (!params.ledger.cleanupPostSignFailure) {
+      reasonCodes.add("POST_SIGN_CLEANUP_REQUIRED");
+    } else {
+      const cleanupResult = await params.ledger.cleanupPostSignFailure({
+        row: params.row,
+        signedOperation: params.signedOperation,
+        reasonCodes: [...reasonCodes],
+      });
+      if (!cleanupResult?.ok || cleanupResult.statusPersisted !== true) {
+        reasonCodes.add("POST_SIGN_CLEANUP_REQUIRED");
+      } else {
+        params.row.status = "SIGN_FAILED";
+        params.row.reasonCodes = [...reasonCodes];
+      }
+      for (const reason of cleanupResult?.reasonCodes ?? []) {
+        reasonCodes.add(reason);
       }
     }
   } catch {
-    reasonCodes.push("POST_SIGN_CLEANUP_REQUIRED");
+    reasonCodes.add("POST_SIGN_CLEANUP_REQUIRED");
   }
 
-  await params.ledger.markStatus(params.row.intentId, "SIGN_FAILED", reasonCodes);
-  return [...new Set(reasonCodes)];
+  return [...reasonCodes];
+}
+
+function cloneBoundaryValue<T>(
+  value: T,
+  reason: Extract<
+    AbortReason,
+    | "UNSIGNED_OPERATION_SNAPSHOT_REQUIRED"
+    | "SIGNED_OPERATION_SNAPSHOT_REQUIRED"
+    | "INTENT_SNAPSHOT_REQUIRED"
+    | "SIMULATION_SNAPSHOT_REQUIRED"
+  >,
+): T {
+  try {
+    return clonePlainBoundaryData(value, new WeakMap<object, unknown>()) as T;
+  } catch {
+    throw new SafeloopAbort([reason]);
+  }
+}
+
+function clonePlainBoundaryData(
+  value: unknown,
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint" ||
+    typeof value === "undefined"
+  ) {
+    return value;
+  }
+  if (typeof value !== "object") throw new Error("UNSUPPORTED_BOUNDARY_VALUE");
+  if (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer) {
+    throw new Error("SHARED_MEMORY_BOUNDARY_VALUE");
+  }
+  const existing = seen.get(value);
+  if (existing !== undefined) return existing;
+  if (Buffer.isBuffer(value)) {
+    const copy = Buffer.from(value);
+    seen.set(value, copy);
+    return copy;
+  }
+  if (value instanceof Date) {
+    const copy = new Date(Date.prototype.getTime.call(value));
+    seen.set(value, copy);
+    return copy;
+  }
+  if (value instanceof ArrayBuffer) {
+    const copy = value.slice(0);
+    seen.set(value, copy);
+    return copy;
+  }
+  if (ArrayBuffer.isView(value)) {
+    if (
+      typeof SharedArrayBuffer !== "undefined" &&
+      value.buffer instanceof SharedArrayBuffer
+    ) {
+      throw new Error("SHARED_MEMORY_BOUNDARY_VALUE");
+    }
+    const bytes = Uint8Array.from(
+      new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+    ).buffer;
+    const copy = value instanceof DataView
+      ? new DataView(bytes)
+      : new (value.constructor as new (buffer: ArrayBuffer) => ArrayBufferView)(bytes);
+    seen.set(value, copy);
+    return copy;
+  }
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(value, copy);
+    for (const entry of value) copy.push(clonePlainBoundaryData(entry, seen));
+    return copy;
+  }
+  if (value instanceof Map) {
+    const copy = new Map<unknown, unknown>();
+    seen.set(value, copy);
+    for (const [key, entry] of value) {
+      copy.set(
+        clonePlainBoundaryData(key, seen),
+        clonePlainBoundaryData(entry, seen),
+      );
+    }
+    return copy;
+  }
+  if (value instanceof Set) {
+    const copy = new Set<unknown>();
+    seen.set(value, copy);
+    for (const entry of value) copy.add(clonePlainBoundaryData(entry, seen));
+    return copy;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new Error("NON_PLAIN_BOUNDARY_VALUE");
+  }
+  const copy = Object.create(prototype) as Record<string, unknown>;
+  seen.set(value, copy);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string") throw new Error("SYMBOL_BOUNDARY_KEY");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      throw new Error("ACCESSOR_BOUNDARY_VALUE");
+    }
+    copy[key] = clonePlainBoundaryData(descriptor.value, seen);
+  }
+  return copy;
+}
+
+function validateIntentIngress(intent: AgentIntent): void {
+  if (!intent || typeof intent !== "object" || Array.isArray(intent)) {
+    throw new Error("INVALID_INTENT_BOUNDS");
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(intent);
+  } catch {
+    throw new Error("INVALID_INTENT_BOUNDS");
+  }
+  if (Buffer.byteLength(serialized, "utf8") > 64_000) {
+    throw new Error("INVALID_INTENT_BOUNDS");
+  }
+  const actionTypes = new Set<ActionType>([
+    "swap", "transfer", "approve", "lend", "borrow", "bridge",
+    "perps_open", "perps_close", "perps_modify", "perps_cancel",
+    "perps_deposit", "perps_withdraw",
+  ]);
+  const stringFields = new Set([
+    "userGoalId", "wallet", "assetIn", "assetOut", "amountIn",
+    "amountOutMin", "estimatedTradeValueUsd", "targetContract", "calldata",
+    "expectedUtility", "quoteId", "pollingId", "txHash", "nonceDomain",
+    "tokenContract", "tokenSymbol", "accountId", "collateralPoolId", "dex",
+    "symbol", "size", "leverage", "limitPx", "takeProfitPx", "stopLossPx",
+    "maxSlippageBps", "orderId",
+  ]);
+  const booleanFields = new Set([
+    "isTestnetUsdc", "requiresDex", "closeAll", "reduceOnly",
+  ]);
+  const enumFields: Record<string, readonly string[]> = {
+    venue: ["hyperliquid"],
+    network: ["mainnet", "testnet"],
+    priority: ["emergency", "high", "normal", "low"],
+    side: ["long", "short"],
+    orderType: ["market", "limit"],
+  };
+  const allowedFields = new Set([
+    ...stringFields,
+    ...booleanFields,
+    ...Object.keys(enumFields),
+    "chainId", "actionType", "nonce", "route",
+  ]);
+  const entries = Object.entries(intent);
+  if (
+    typeof intent.userGoalId !== "string" ||
+    intent.userGoalId.length === 0 ||
+    typeof intent.wallet !== "string" ||
+    !/^0x[0-9a-fA-F]{40}$/.test(intent.wallet) ||
+    !Number.isSafeInteger(intent.chainId) ||
+    intent.chainId <= 0 ||
+    !actionTypes.has(intent.actionType) ||
+    entries.some(([key, value]) => {
+      if (!allowedFields.has(key)) return true;
+      if (value === undefined) return false;
+      if (stringFields.has(key)) return typeof value !== "string";
+      if (booleanFields.has(key)) return typeof value !== "boolean";
+      if (key === "nonce") {
+        return typeof value !== "number" || !Number.isSafeInteger(value) || value < 0;
+      }
+      if (key in enumFields) {
+        return typeof value !== "string" || !enumFields[key].includes(value);
+      }
+      return false;
+    }) ||
+    [intent.targetContract, intent.tokenContract]
+      .some((value) => value !== undefined && !/^0x[0-9a-fA-F]{40}$/.test(value)) ||
+    (intent.txHash !== undefined && !/^0x[0-9a-fA-F]{64}$/.test(intent.txHash)) ||
+    (intent.calldata !== undefined && !/^0x(?:[0-9a-fA-F]{2})*$/.test(intent.calldata))
+  ) {
+    throw new Error("INVALID_INTENT_SCHEMA");
+  }
+  if (
+    entries.some(
+      ([key, value]) =>
+        key !== "maxSlippageBps" &&
+        typeof value === "string" &&
+        value.length > 4_096,
+    ) ||
+    (intent.route !== undefined &&
+      (!Array.isArray(intent.route) ||
+        intent.route.length > 64 ||
+        intent.route.some(
+          (entry) => typeof entry !== "string" || entry.length > 256,
+        )))
+  ) {
+    throw new Error("INVALID_INTENT_BOUNDS");
+  }
 }
 
 async function verifyActiveLockOwnership(ledger: Ledger, row: ActionLedgerRow) {
   const ownsLock = await ledger.verifyLock?.(row);
   if (!ownsLock) {
-    await ledger.markStatus(row.intentId, "ABORTED", ["LOCK_OWNERSHIP_LOST"]);
     throw new SafeloopAbort(["LOCK_OWNERSHIP_LOST"]);
   }
 }
@@ -914,33 +1406,34 @@ export function checkTrajectoryInvariants(params: {
       reasons.add("NON_EVM_SIMULATION_REQUIRED");
     }
     if (
-      simulation.marginRatioBps !== undefined &&
+      simulation.marginRatioBps === undefined ||
       simulation.marginRatioBps < policy.minMarginRatioBps
     ) {
       reasons.add("MARGIN_RATIO_LIMIT");
     }
     if (
-      simulation.liquidationBufferBps !== undefined &&
+      simulation.liquidationBufferBps === undefined ||
       simulation.liquidationBufferBps < policy.minLiquidationBufferBps
     ) {
       reasons.add("LIQUIDATION_PRICE_TOO_CLOSE");
     }
     if (
-      simulation.accountMarginRatioBps !== undefined &&
+      simulation.accountMarginRatioBps === undefined ||
       simulation.accountMarginRatioBps < policy.minAccountMarginRatioBps
     ) {
       reasons.add("ACCOUNT_HEALTH_LIMIT");
     }
     if (
-      simulation.accountLiquidationBufferBps !== undefined &&
+      simulation.accountLiquidationBufferBps === undefined ||
       simulation.accountLiquidationBufferBps <
         policy.minAccountLiquidationBufferBps
     ) {
       reasons.add("ACCOUNT_HEALTH_LIMIT");
     }
     if (
-      parseMoney(simulation.accountExposureUsd ?? "0") >
-      parseMoney(policy.maxAccountExposureUsd)
+      simulation.accountExposureUsd === undefined ||
+      parseMoney(simulation.accountExposureUsd) >
+        parseMoney(policy.maxAccountExposureUsd)
     ) {
       reasons.add("ACCOUNT_HEALTH_LIMIT");
     }
@@ -1166,6 +1659,25 @@ export function checkTrajectoryInvariants(params: {
   }
 
   if (!isEmergencyGasAction(current)) {
+    if (current.actionType.startsWith("perps_")) {
+      if (
+        !isNonnegativeMoney(simulation.nativeBalanceUsd) ||
+        !isNonnegativeMoney(simulation.estimatedMaxGasUsd) ||
+        !Number.isSafeInteger(simulation.gasRunwayTransactions) ||
+        (simulation.gasRunwayTransactions ?? -1) < 0
+      ) {
+        reasons.add("GAS_RUNWAY_LOW");
+      }
+      if (!isNonnegativeMoney(simulation.gasSpentLookbackUsd)) {
+        reasons.add("GAS_BURN_RATE_LIMIT");
+      }
+    }
+    if (
+      current.actionType.startsWith("perps_") &&
+      simulation.gasRunwayTransactions === undefined
+    ) {
+      reasons.add("GAS_RUNWAY_LOW");
+    }
     if (
       simulation.gasRunwayTransactions !== undefined &&
       simulation.gasRunwayTransactions < policy.minGasRunwayTransactions
@@ -1823,6 +2335,12 @@ function roundAmountBucket(value?: string): string | undefined {
 function parseMoney(value: string): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isNonnegativeMoney(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0;
 }
 
 function sha256(value: string): string {

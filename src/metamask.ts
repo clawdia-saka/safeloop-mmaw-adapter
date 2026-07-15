@@ -69,9 +69,14 @@ export type MetaMaskAgenticSdkLike<TUnsignedOperation, TSignedOperation> = {
   capabilities?: {
     intentBoundSignatures?: boolean;
     nonBroadcastingSignatures?: boolean;
+    expiringSignatures?: boolean;
+    abortableSignatures?: boolean;
   };
   buildUnsignedOperation(intent: CanonicalIntent): Promise<TUnsignedOperation>;
-  sign(operation: TUnsignedOperation): Promise<TSignedOperation>;
+  sign(
+    operation: TUnsignedOperation,
+    options?: { signal: AbortSignal },
+  ): Promise<TSignedOperation>;
   assertSignedOperationMatchesIntent?: MmawSigner<
     TUnsignedOperation,
     TSignedOperation
@@ -90,9 +95,18 @@ export function createMetaMaskAgenticSdkSigner<
         sdk.capabilities?.intentBoundSignatures === true,
       nonBroadcastingSignatures:
         sdk.capabilities?.nonBroadcastingSignatures === true,
+      ...(sdk.capabilities?.expiringSignatures === true
+        ? { expiringSignatures: true }
+        : {}),
+      ...(sdk.capabilities?.abortableSignatures === true
+        ? { abortableSignatures: true }
+        : {}),
     },
     buildUnsignedOperation: (intent) => sdk.buildUnsignedOperation(intent),
-    sign: async (operation: TUnsignedOperation) => {
+    sign: async (
+      operation: TUnsignedOperation,
+      options?: { signal: AbortSignal },
+    ) => {
       // DM-F1: Interceptor for SDK
       const intent = (operation as any).intent;
       if (intent) {
@@ -100,7 +114,7 @@ export function createMetaMaskAgenticSdkSigner<
       }
 
       try {
-        return await sdk.sign(operation);
+        return await sdk.sign(operation, options);
       } catch (error: any) {
         // DM-F3: Structured Failure Evidence Packet
         const packet = sanitizeMetaMaskEvidence({

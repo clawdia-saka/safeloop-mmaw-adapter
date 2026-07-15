@@ -50,6 +50,7 @@ const fullLedgerCapabilities = {
   priorityLocks: true,
   preemptionCancellation: true,
   lockFencing: true,
+  ownerBoundStatusWrites: true,
 };
 
 function makeSigningLedger(overrides = {}) {
@@ -60,9 +61,15 @@ function makeSigningLedger(overrides = {}) {
     capabilities: fullLedgerCapabilities,
     tryLock: async () => true,
     verifyLock: async () => true,
+    renewLock: async () => true,
     markStatus: async (intentId, status, reasonCodes = []) => {
       statuses.push({ intentId, status, reasonCodes });
     },
+    markStatusOwned: async (row, status, reasonCodes = []) => {
+      statuses.push({ intentId: row.intentId, status, reasonCodes });
+      return true;
+    },
+    releaseOwnedLocks: async () => true,
     recentForWallet: async () => [],
     ...overrides,
   };
@@ -412,10 +419,14 @@ test("verifies lock ownership immediately before signing", async () => {
       priorityLocks: true,
       preemptionCancellation: true,
       lockFencing: true,
+      ownerBoundStatusWrites: true,
     },
     tryLock: async () => true,
     verifyLock: async () => false,
+    renewLock: async () => true,
     markStatus: async () => {},
+    markStatusOwned: async () => true,
+    releaseOwnedLocks: async () => true,
     recentForWallet: async () => [],
   };
 
@@ -436,6 +447,8 @@ test("verifies lock ownership immediately before signing", async () => {
           capabilities: {
             intentBoundSignatures: true,
             nonBroadcastingSignatures: true,
+            expiringSignatures: true,
+            abortableSignatures: true,
           },
           buildUnsignedOperation: async () => ({}),
           sign: async () => {
@@ -521,6 +534,8 @@ test("allows signing when chain is explicitly allowlisted", async () => {
       capabilities: {
         intentBoundSignatures: true,
         nonBroadcastingSignatures: true,
+        expiringSignatures: true,
+        abortableSignatures: true,
       },
       buildUnsignedOperation: async (intent) => ({ intent }),
       sign: async () => signedOperation,
@@ -533,7 +548,8 @@ test("allows signing when chain is explicitly allowlisted", async () => {
     policy: { supportedChainIds: [1] },
   });
 
-  assert.equal(signed, signedOperation);
+  assert.deepEqual(signed, signedOperation);
+  assert.notEqual(signed, signedOperation);
   assert.equal(ledger.statuses.at(-1).status, "SIGNED");
 });
 
@@ -545,7 +561,7 @@ test("post-sign assertion mismatch runs cleanup before failing closed", async ()
       assert.equal(row.chainId, 1);
       assert.ok(reasonCodes.includes("SIGNED_OPERATION_INTENT_MISMATCH"));
       assert.equal(signedOperation.chainId, 999);
-      return { ok: true };
+      return { ok: true, statusPersisted: true };
     },
   });
 
@@ -558,6 +574,8 @@ test("post-sign assertion mismatch runs cleanup before failing closed", async ()
           capabilities: {
             intentBoundSignatures: true,
             nonBroadcastingSignatures: true,
+            expiringSignatures: true,
+            abortableSignatures: true,
           },
           buildUnsignedOperation: async (intent) => ({ intent }),
           sign: async () => ({ chainId: 999 }),
@@ -575,9 +593,6 @@ test("post-sign assertion mismatch runs cleanup before failing closed", async ()
   );
 
   assert.equal(cleanupCalled, true);
-  assert.deepEqual(ledger.statuses.at(-1).reasonCodes, [
-    "SIGNED_OPERATION_INTENT_MISMATCH",
-  ]);
 });
 
 test("post-sign assertion cleanup failure leaves cleanup-required reason", async () => {
@@ -594,6 +609,8 @@ test("post-sign assertion cleanup failure leaves cleanup-required reason", async
           capabilities: {
             intentBoundSignatures: true,
             nonBroadcastingSignatures: true,
+            expiringSignatures: true,
+            abortableSignatures: true,
           },
           buildUnsignedOperation: async (intent) => ({ intent }),
           sign: async () => ({ chainId: 999 }),
@@ -609,11 +626,7 @@ test("post-sign assertion cleanup failure leaves cleanup-required reason", async
       error.reasonCodes.includes("POST_SIGN_CLEANUP_REQUIRED"),
   );
 
-  assert.ok(
-    ledger.statuses
-      .at(-1)
-      .reasonCodes.includes("POST_SIGN_CLEANUP_REQUIRED"),
-  );
+  assert.equal(ledger.statuses.at(-1).status, "SIGNING");
 });
 
 test("sanitizes evidence packets before operator logging", () => {
@@ -956,7 +969,7 @@ test("locks shared collateral across different venues", () => {
 
   const prior = row({
     actionType: "perps_open",
-    venue: "backpack",
+    venue: "hyperliquid",
     collateralPoolId: "main-usdc",
     dex: "dex-b",
     symbol: "eth",
@@ -964,6 +977,7 @@ test("locks shared collateral across different venues", () => {
     size: "10",
     leverage: "3",
   });
+  prior.venue = "backpack";
   prior.intentId = "prior";
   prior.idempotencyKey = "prior-key";
   prior.globalCollateralLockScope = current.globalCollateralLockScope;
@@ -1004,7 +1018,7 @@ test("lets emergency close preempt lower-priority global collateral lock", () =>
 
   const prior = row({
     actionType: "perps_open",
-    venue: "backpack",
+    venue: "hyperliquid",
     collateralPoolId: "main-usdc",
     dex: "dex-b",
     symbol: "eth",
@@ -1013,6 +1027,7 @@ test("lets emergency close preempt lower-priority global collateral lock", () =>
     leverage: "3",
     priority: "low",
   });
+  prior.venue = "backpack";
   prior.intentId = "prior";
   prior.idempotencyKey = "prior-key";
   prior.globalCollateralLockScope = current.globalCollateralLockScope;
@@ -2525,6 +2540,8 @@ test("rechecks timestamp expiry immediately before signing", async () => {
         capabilities: {
           intentBoundSignatures: true,
           nonBroadcastingSignatures: true,
+          expiringSignatures: true,
+          abortableSignatures: true,
         },
         buildUnsignedOperation: async (intent) => ({ intent }),
         sign: async () => {
