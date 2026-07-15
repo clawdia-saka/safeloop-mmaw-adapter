@@ -145,6 +145,8 @@ export type MmCliRunnerOptions = {
 
 const DEFAULT_MM_CLI_TIMEOUT_MS = 620_000;
 const DEFAULT_MM_CLI_MAX_OUTPUT_BYTES = 1_000_000;
+const MAX_MM_CLI_SLIPPAGE_BPS_LENGTH = 24;
+const MAX_MM_CLI_SLIPPAGE_BPS_DECIMAL_PLACES = 18;
 
 export function createMmCliRunner(
   options: MmCliRunnerOptions = {},
@@ -299,19 +301,62 @@ function buildTransferArgs(intent: CanonicalIntent): string[] {
 function buildSwapArgs(intent: CanonicalIntent): string[] {
   requireFields(intent, ["assetIn", "assetOut", "amountIn"]);
 
-  return [
+  const args = [
     "swap",
     "execute",
-    "--from-token",
+    "--from",
     intent.assetIn,
-    "--to-token",
+    "--to",
     intent.assetOut,
     "--amount",
     intent.amountIn,
     "--from-chain",
     String(intent.chainId),
-    "--json",
   ];
+
+  if (intent.maxSlippageBps !== undefined) {
+    args.push("--slippage", basisPointsToPercent(intent.maxSlippageBps));
+  }
+  args.push("--json");
+
+  return args;
+}
+
+function basisPointsToPercent(value: string): string {
+  if (
+    value.length > MAX_MM_CLI_SLIPPAGE_BPS_LENGTH ||
+    !/^\d+(?:\.\d+)?$/.test(value)
+  ) {
+    throw new Error("INVALID_MM_CLI_SLIPPAGE_BPS");
+  }
+
+  const [rawWhole, fraction = ""] = value.split(".");
+  if (fraction.length > MAX_MM_CLI_SLIPPAGE_BPS_DECIMAL_PLACES) {
+    throw new Error("INVALID_MM_CLI_SLIPPAGE_BPS");
+  }
+  const whole = rawWhole.replace(/^0+(?=\d)/, "");
+  if (
+    whole.length > 5 ||
+    (whole.length === 5 && whole > "10000") ||
+    (whole === "10000" && /[1-9]/.test(fraction))
+  ) {
+    throw new Error("INVALID_MM_CLI_SLIPPAGE_BPS");
+  }
+
+  const digits = `${whole}${fraction}`;
+  const decimalIndex = whole.length - 2;
+  const percent = decimalIndex > 0
+    ? `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`
+    : `0.${"0".repeat(-decimalIndex)}${digits}`;
+  const decimalPoint = percent.indexOf(".");
+  let end = percent.length;
+  while (end > decimalPoint + 1 && percent.charCodeAt(end - 1) === 48) {
+    end -= 1;
+  }
+  if (end === decimalPoint + 1) end = decimalPoint;
+  const normalized = percent.slice(0, end);
+
+  return normalized || "0";
 }
 
 function buildPerpsOpenArgs(intent: CanonicalIntent): string[] {
