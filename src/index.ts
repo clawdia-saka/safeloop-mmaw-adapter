@@ -494,6 +494,10 @@ export function canonicalizeIntent(
     collateralPoolId: intent.collateralPoolId?.toLowerCase(),
     priority: intent.priority ?? inferPriority(intent),
     ...canonicalizePerpsFields(intent),
+    maxSlippageBps:
+      intent.actionType === "swap" || intent.actionType.startsWith("perps_")
+        ? normalizeSlippageBps(intent.maxSlippageBps)
+        : undefined,
     roundedAmountBucket: roundAmountBucket(intent.amountIn ?? intent.size),
     timeBucket,
   };
@@ -1787,6 +1791,24 @@ function normalizeDecimal(value?: string): string | undefined {
   if (value === undefined) return undefined;
   if (!/^\d+(\.\d+)?$/.test(value)) throw new Error("INVALID_DECIMAL");
   return value.replace(/^0+(?=\d)/, "");
+}
+
+const MAX_SLIPPAGE_BPS_SERIALIZED_LENGTH = 24;
+const MAX_SLIPPAGE_BPS_DECIMAL_PLACES = 18;
+
+function normalizeSlippageBps(value?: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length > MAX_SLIPPAGE_BPS_SERIALIZED_LENGTH) {
+    throw new Error("INVALID_SLIPPAGE_BPS");
+  }
+  const decimalPoint = value.indexOf(".");
+  if (
+    decimalPoint !== -1 &&
+    value.length - decimalPoint - 1 > MAX_SLIPPAGE_BPS_DECIMAL_PLACES
+  ) {
+    throw new Error("INVALID_SLIPPAGE_BPS");
+  }
+  return normalizeDecimal(value);
 }
 
 function roundAmountBucket(value?: string): string | undefined {

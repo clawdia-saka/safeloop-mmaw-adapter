@@ -25,6 +25,12 @@ This repo includes explicit MetaMask connection points:
 - `docs/hip3.md` covers the current Hyperliquid HIP-3 perps workflow.
 - `docs/death-metrics.md` covers red-team failure scenarios and required guards.
 
+Swap argv follows `@metamask/agentic-cli` 4.0.1: `--from`, `--to`,
+`--amount`, and `--from-chain`. Optional `maxSlippageBps` is converted exactly
+from basis points to the CLI's percentage-valued `--slippage`; values above
+10,000 bps or with more than 18 decimal places are rejected before the CLI
+runner can execute.
+
 ## Quick Start
 
 ```bash

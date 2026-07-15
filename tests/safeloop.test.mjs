@@ -182,6 +182,118 @@ test("builds MetaMask request watch and tx history args", () => {
   ]);
 });
 
+test("canonicalizes swap and perps slippage without raw-field overwrite", () => {
+  const swap = canonicalizeIntent(intentForSigning({ maxSlippageBps: "00050.00" }));
+  const perps = canonicalizeIntent(intentForSigning({
+    actionType: "perps_open",
+    assetIn: undefined,
+    assetOut: undefined,
+    amountIn: undefined,
+    symbol: "ETH",
+    side: "long",
+    size: "1",
+    leverage: "2",
+    maxSlippageBps: "00075.0",
+  }));
+
+  assert.equal(swap.maxSlippageBps, "50.00");
+  assert.equal(perps.maxSlippageBps, "75.0");
+});
+
+test("rejects oversized slippage at canonicalization ingress", () => {
+  assert.throws(
+    () => canonicalizeIntent(intentForSigning({
+      maxSlippageBps: `1.${"0".repeat(50_000)}`,
+    })),
+    /INVALID_SLIPPAGE_BPS/,
+  );
+  assert.throws(
+    () => canonicalizeIntent(intentForSigning({
+      maxSlippageBps: `1.${"0".repeat(19)}`,
+    })),
+    /INVALID_SLIPPAGE_BPS/,
+  );
+});
+
+test("builds exact MetaMask CLI v4 swap argv", async () => {
+  const signer = createMmCliSigner(async () => ({ stdout: "", stderr: "" }));
+  const operation = await signer.buildUnsignedOperation(canonicalizeIntent(
+    intentForSigning({ maxSlippageBps: "125" }),
+  ));
+
+  assert.deepEqual(operation.args, [
+    "swap",
+    "execute",
+    "--from",
+    "eth",
+    "--to",
+    "usdc",
+    "--amount",
+    "1",
+    "--from-chain",
+    "1",
+    "--slippage",
+    "1.25",
+    "--json",
+  ]);
+  assert.equal(operation.args.includes("--from-token"), false);
+  assert.equal(operation.args.includes("--to-token"), false);
+});
+
+test("converts swap slippage basis points to exact decimal percentages", async () => {
+  const signer = createMmCliSigner(async () => ({ stdout: "", stderr: "" }));
+  const cases = [
+    ["0", "0"],
+    ["1", "0.01"],
+    ["1.5", "0.015"],
+    ["50", "0.5"],
+    ["10000", "100"],
+    ["10000.000000000000000000", "100"],
+  ];
+
+  for (const [basisPoints, percent] of cases) {
+    const operation = await signer.buildUnsignedOperation(canonicalizeIntent(
+      intentForSigning({ maxSlippageBps: basisPoints }),
+    ));
+    assert.equal(
+      operation.args.at(operation.args.indexOf("--slippage") + 1),
+      percent,
+    );
+  }
+});
+
+test("rejects swap slippage above 10000 bps before runner execution", async () => {
+  let runnerCalled = false;
+  const signer = createMmCliSigner(async () => {
+    runnerCalled = true;
+    return { stdout: "", stderr: "" };
+  });
+
+  await assert.rejects(
+    () => signer.buildUnsignedOperation(canonicalizeIntent(
+      intentForSigning({ maxSlippageBps: "10000.0001" }),
+    )),
+    /INVALID_MM_CLI_SLIPPAGE_BPS/,
+  );
+  assert.equal(runnerCalled, false);
+});
+
+test("rejects huge valid swap slippage fractions before runner execution", async () => {
+  let runnerCalled = false;
+  const signer = createMmCliSigner(async () => {
+    runnerCalled = true;
+    return { stdout: "", stderr: "" };
+  });
+
+  await assert.rejects(
+    () => signer.buildUnsignedOperation(
+      intentForSigning({ maxSlippageBps: `1.${"0".repeat(50_000)}` }),
+    ),
+    /INVALID_MM_CLI_SLIPPAGE_BPS/,
+  );
+  assert.equal(runnerCalled, false);
+});
+
 test("MetaMask helpers advertise intent binding only when explicitly provided", () => {
   const unsafeSdkSigner = createMetaMaskAgenticSdkSigner({
     buildUnsignedOperation: async (intent) => ({ intent }),

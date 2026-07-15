@@ -1,11 +1,12 @@
-# MMAW signer and CLI process boundary
+# MMAW signer boundary and CLI v4 compatibility
 
 ## Goal
 
 Make the documented `sign()`-without-broadcasting requirement an enforced,
 fail-closed runtime contract, including bounded execution of the legacy `mm`
 sign-and-submit adapter when it is used behind a separate transaction-bound
-authorization.
+authorization. Keep generated commands compatible with the documented
+`@metamask/agentic-cli` 4.0.1 surface.
 
 ## Capability
 
@@ -23,6 +24,12 @@ authorization.
   redacted failure to callers.
 - Documentation must not show the sign-and-submit CLI adapter as a valid
   `failClosedSign` signer.
+- Swap execution must use the CLI v4 flags `--from`, `--to`, `--amount`, and
+  `--from-chain`; legacy `--from-token` / `--to-token` flags must never be
+  emitted.
+- Optional swap `maxSlippageBps` must be preserved during canonicalization and
+  converted exactly to the CLI's percentage-valued `--slippage` flag. Values
+  above 10,000 bps must fail before process execution.
 
 ## Regression
 
@@ -33,6 +40,8 @@ authorization.
   new rejection tests.
 - Bounded-process regressions cover success, timeout, output overflow, and
   secret-bearing stderr without invoking a real wallet command.
+- Command regressions assert the exact CLI v4 swap argv, including the absence
+  of legacy flags and exact basis-point conversion.
 
 ## Non-goals
 

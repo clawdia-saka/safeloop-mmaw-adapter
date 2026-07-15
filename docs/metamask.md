@@ -84,11 +84,19 @@ Current mapping:
 
 ```text
 transfer -> mm transfer --token <assetOut> --amount <amountIn> --to <targetContract> --chain-id <chainId> --json
-swap     -> mm swap execute --from-token <assetIn> --to-token <assetOut> --amount <amountIn> --from-chain <chainId> --json
+swap     -> mm swap execute --from <assetIn> --to <assetOut> --amount <amountIn> --from-chain <chainId> [--slippage <percent>] --json
 perps    -> mm perps <open|close|modify|cancel> ... --dry-run --json
 watch    -> mm wallet requests watch --polling-id <id> --json
 history  -> mm tx history --json ...
 ```
+
+The swap mapping matches `@metamask/agentic-cli` 4.0.1. Safeloop preserves
+`maxSlippageBps` during intent canonicalization, then converts it to an exact
+decimal percentage without floating-point arithmetic (for example, `1` bps
+becomes `0.01`, `50` becomes `0.5`, and `10,000` becomes `100`). Values outside
+the accepted `0..10,000` bps range, serialized inputs longer than 24
+characters, and values with more than 18 decimal places fail before runner
+execution. The legacy `--from-token` and `--to-token` flags are never emitted.
 
 For Hyperliquid HIP-3 builder DEX markets, see `docs/hip3.md`.
 
