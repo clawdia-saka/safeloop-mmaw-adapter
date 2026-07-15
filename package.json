@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "description": "Pre-sign runtime safety layer for MetaMask Agent Wallet.",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -32,6 +35,18 @@
     "./hyperliquid": {
       "types": "./dist/hyperliquid.d.ts",
       "default": "./dist/hyperliquid.js"
+    },
+    "./sqlite-ledger": {
+      "types": "./dist/sqlite-ledger.d.ts",
+      "default": "./dist/sqlite-ledger.js"
+    },
+    "./simulators": {
+      "types": "./dist/simulators.d.ts",
+      "default": "./dist/simulators.js"
+    },
+    "./readiness": {
+      "types": "./dist/readiness.d.ts",
+      "default": "./dist/readiness.js"
     }
   },
   "scripts": {

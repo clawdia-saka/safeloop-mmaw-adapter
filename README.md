@@ -39,9 +39,82 @@ npm run typecheck
 npm test
 ```
 
-The package is currently a prototype. Storage, simulation, and signing are
-interfaces, so production users must connect their own durable ledger,
-simulation backend, and MetaMask Agent Wallet integration.
+The package now includes a file-backed `node:sqlite` ledger and read-only Anvil
+and Tenderly RPC simulators. A concrete intent-bound MetaMask signer, durable
+time source, price/NAV evidence provider, and the remaining live State C
+capabilities still have to be supplied by the deployer.
+
+## Production Readiness Adapters
+
+Import `createSqliteLedger` from `@safeloop/mmaw-adapter/sqlite-ledger`.
+It persists actions and atomically acquires the
+intent, account, and global collateral scopes under one SQLite transaction. It
+uses expiring owned leases, exposes explicit renewal, owner-bound status writes,
+and monotonic fencing epochs. Ownership verification is read-only. `:memory:`
+is rejected because it cannot survive a restart.
+Owner-bound rows reject the legacy unfenced `markStatus(intentId, ...)` path;
+callers must use `markStatusOwned(...)`. All pre-sign failures make a
+best-effort fenced terminal write and release their owned scopes. Wallet-history
+reads fail closed when more than 1,000 in-window rows would otherwise be
+silently truncated.
+
+`createAnvilSimulator(...)` calls only `eth_chainId`, `eth_call`, and
+`eth_estimateGas`. `createTenderlySimulator(...)` probes `eth_chainId` and calls
+only `tenderly_simulateTransaction`. Both adapters cap request/response sizes,
+enforce a timeout and chain identity, redact failures, and require a caller
+`riskEvidence` provider with financial, signature-expiry, oracle-age, and
+durable time-calibration evidence. Neither adapter can sign or broadcast.
+The provider receives an `AbortSignal` and must stop its own I/O or computation
+when the bounded evidence deadline aborts it.
+The provider receives isolated operation/intent snapshots, so it cannot change
+the operation already simulated. These EVM adapters reject all `perps_*`
+intents; those require the existing non-EVM venue margin model with complete
+margin, liquidation, account exposure, and gas-runway evidence.
+RPC URLs are trusted operator configuration and must never be accepted from an
+agent intent or other untrusted request input; Tenderly endpoints require HTTPS.
+
+`assessLiveStateCReadiness(...)` is a pure fail-closed assessment. It does not
+probe, sign, or send anything: callers pass a recent RPC probe and durable time
+calibration record. `ready` is true only when the full ledger, signer,
+simulator, chain policy, expiring/abortable-signature, explicit lease-renewal,
+and post-sign assertion capability set is present. Runtime values, timestamps,
+numeric policy limits, throwing accessors/proxies, and related bounds are
+checked strictly. This is structural validation of trusted
+deployment-supplied adapters/evidence, not cryptographic attestation of
+arbitrary third-party objects.
+
+The SQLite adapter disables priority preemption by default. Deployers may add a
+trusted `authorizePreemption` verifier, which must enforce cancellation,
+nonce-domain, quorum, freshness, rate-limit, and non-preemptable signing-window
+policy. Even with that verifier, the adapter never replaces a live `SIGNING` or
+`SIGNED` owner: a boolean callback cannot atomically revoke an externally usable
+payload. It does not advertise production priority/preemption or in-flight gas
+accounting capabilities. Live State C remains blocked until a deployment
+supplies durable gas reservation/accounting and venue-specific cancellation
+enforcement. This avoids certifying a partial adapter as production-ready.
+
+With production durable-ledger policy enabled, `failClosedSign(...)` also
+requires `ownerBoundStatusWrites: true` and `markStatusOwned(...)` before it
+acquires a lock. It also requires actual `renewLock(...)` and
+`releaseOwnedLocks(...)` operations and an abortable signer; the signer receives
+an `AbortSignal` and signing is bounded by
+the shorter signature/authoritative renewed-lease deadline. A signer that does
+not acknowledge abort keeps the durable `SIGNING` shadow and its locks for
+reconciliation; Safeloop never releases them while signing may still continue.
+This makes the final post-sign `SIGNED`
+transition an atomic ownership/fencing check. Unsigned, simulation, and signed
+values must use plain data or supported copied byte containers. Custom class
+instances, accessors, symbols, and shared memory are rejected; `Buffer` and
+non-shared typed-array bytes are copied without changing their runtime byte
+type. The production path simulates, asserts, and returns isolated snapshots so
+a callback cannot mutate a previously validated payload. Every post-sign
+failure invokes cleanup. A successful cleanup must atomically persist
+`SIGN_FAILED` and retire the owned payload/locks; if that cannot be proven, the
+durable `SIGNING` shadow remains. Signature expiry is rechecked immediately
+before the final owned write. Runtime intents are allowlist/schema validated before a lock
+is acquired. Legacy ledgers retain their original object identity/capability
+behavior only when the caller explicitly disables the durable production
+policy.
 
 ## The Problem
 
@@ -301,12 +374,15 @@ Included:
 - MetaMask Agentic CLI helpers for `wallet requests watch` and `tx history`
 - bounded direct-process execution for the legacy `mm` adapter (no shell,
   finite timeout, capped output, redacted failures)
+- restart-durable SQLite action ledger with atomic multi-scope leases and
+  fencing
+- bounded, non-broadcasting Anvil and Tenderly simulation adapters
+- explicit live State C readiness assessment
 
 Not included yet:
 
-- production ledger adapter
-- Anvil or Tenderly simulator adapter
 - full concrete `@metamask/agentic-sdk` API binding
+- venue-specific priority preemption, cancellation proof, and gas accounting
 - full `mm` command coverage beyond transfer, swap, and perps prototype commands
 - notification adapter
 
@@ -315,6 +391,9 @@ Not included yet:
 ```text
 src/index.ts              Core adapter types and fail-closed signing flow
 src/metamask.ts           MetaMask Agentic SDK and mm CLI adapters
+src/sqlite-ledger.ts      Durable SQLite action and scoped-lock ledger
+src/simulators.ts         Read-only Anvil and Tenderly RPC simulators
+src/readiness.ts          Pure live State C readiness assessment
 src/reconciliation.ts     Wallet request and venue reconciliation helpers
 src/hyperliquid.ts        Hyperliquid perps margin-model helpers
 docs/architecture.md      Detailed architecture and policy model
@@ -377,9 +456,9 @@ facing access.
 
 ## Roadmap
 
-1. Add SQLite and Supabase Action Ledger adapters around `sql/supabase.sql`.
-2. Add `safeloop-mm` CLI wrapper so agents do not call `mm` directly.
-3. Add Anvil or Tenderly dry-run simulator adapter.
+1. Add a Supabase Action Ledger adapter around `sql/supabase.sql`.
+2. Add venue-specific priority/preemption cancellation and gas accounting.
+3. Add `safeloop-mm` CLI wrapper so agents do not call `mm` directly.
 4. Expand MetaMask Agentic SDK wrapper against the concrete SDK API.
 5. Expand `mm` CLI wrapper beyond transfer, swap, and perps prototype commands.
 6. Add Slack and Notion notification hooks.
